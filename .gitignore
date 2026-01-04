@@ -5,15 +5,10 @@
 # Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.venv/
 venv/
-.envrc
+.venv/
 
-# Logs
+# Logs / runtime files
 *.log
 *.err
-
-# macOS
-.DS_Store
+state/
