@@ -64,7 +64,7 @@ Duplicate-ready Notion templates available here:
 
 ```env
 NOTION_TOKEN=
-NOTION_DB_ID=
+NOTION_DATABASE_ID=
 HOUSE_PAGE_ID=
 
 HA_URL=
@@ -72,7 +72,7 @@ HA_TOKEN=
 HA_TEMP_ENTITY=
 HA_HUMIDITY_ENTITY=
 
-THINGS_PROJECT_NAME=Plant Care
+THINGS_PROJECT_NAME="Plant Care"
 ```
 
 # Watering Model

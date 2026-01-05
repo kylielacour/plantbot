@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 
 # ===== Config (from .env) =====
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-NOTION_DATABASE_ID = os.environ["NOTION_DB_ID"]
+NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 THINGS_PROJECT = os.environ.get("THINGS_PROJECT", "Plant Care")
 
 PROP_NAME = os.environ.get("PROP_NAME", "Name")
