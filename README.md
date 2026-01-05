@@ -55,6 +55,11 @@ Home Assistant → Notion (House Conditions)
 
 A .env.example file is included to show required environment variables.
 
+## Notion Templates
+Duplicate-ready Notion templates available here:
+- [Houseplant Log](https://kyliela.notion.site/2decff8c9db18185a4acf4c6165cf94e?v=2decff8c9db181cabd73000c44df55be&source=copy_link)
+- [House Conditions](https://kyliela.notion.site/2decff8c9db180428126f18585025811?v=2decff8c9db181f5aac4000ce324edaa&source=copy_link)
+
 ## Environment Variables
 
 ```env
