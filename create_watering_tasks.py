@@ -117,6 +117,10 @@ end tell
 
 # ===== Main =====
 def main() -> None:
+    print("Running create_watering_tasks...")
+    print("THINGS_PROJECT:", THINGS_PROJECT)
+    print("NOTION_DATABASE_ID:", NOTION_DATABASE_ID)
+
     today_iso = dt.date.today().isoformat()
 
     payload = {
@@ -133,11 +137,14 @@ def main() -> None:
 
     results = r.json().get("results", [])
 
+    print(f"Notion rows returned: {len(results)}")
+
     for page in results:
         page_id = page["id"]
         props = page.get("properties", {})
 
         if task_exists_for_notion_id(page_id):
+            print("SKIP (dedupe):", page_id)
             continue
 
         plant_name = get_title(props)
@@ -158,6 +165,8 @@ def main() -> None:
             f"Notion: https://www.notion.so/{page_id.replace('-', '')}\n"
             f"notion_id: {page_id}"
         )
+
+        print("READY:", task_title)
 
         create_things_task_due_today(task_title, notes)
 
