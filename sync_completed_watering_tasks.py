@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,10 +12,6 @@ from dateutil import parser as dateparser
 
 # --- Config (env) ---
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-HOUSEPLANT_DB_ID = os.environ["NOTION_DATABASE_ID"]
-THINGS_PROJECT_NAME = os.environ.get("THINGS_PROJECT_NAME", "Plant Care")
-
-# Notion property names (match your database)
 PROP_LAST_WATERED = os.environ.get("PROP_LAST_WATERED", "Last Watered")
 
 # --- State ---
@@ -79,13 +76,16 @@ tell application "Things3"
       set tNotes to (notes of t)
       if tNotes contains "notion_id:" then
         set tId to (id of t) as text
+        set tName to (name of t) as text
         set tComp to (completion date of t) as text
 
         -- Escape line breaks in notes so output stays one record per line
         set tNotes to my replaceText((ASCII character 10), "\\\\n", tNotes)
         set tNotes to my replaceText((ASCII character 13), "", tNotes)
+        set tName to my replaceText((ASCII character 10), " ", tName)
+        set tName to my replaceText((ASCII character 13), "", tName)
 
-        set outText to outText & tId & "|||" & tNotes & "|||" & tComp & linefeed
+        set outText to outText & tId & "|||" & tNotes & "|||" & tComp & "|||" & tName & linefeed
       end if
     end try
   end repeat
@@ -106,12 +106,14 @@ end tell
         if "|||" not in line:
             continue
         try:
-            tid, notes, comp = line.split("|||", 2)
-            # Un-escape notes back to real newlines (optional)
-            notes = notes.replace("\\n", "\n")
+            parts = line.split("|||")
+            tid = parts[0]
+            notes = parts[1].replace("\\n", "\n")
+            comp = parts[2]
+            name = parts[3] if len(parts) > 3 else "(name unavailable)"
             items.append({
                 "tid": tid.strip(),
-                "name": "(name unavailable)",
+                "name": name.strip(),
                 "notes": notes,
                 "completion_str": comp.strip(),
             })
@@ -185,14 +187,23 @@ def main():
 
     updated = 0
     for tid, notion_page_id, local_date, name in to_process:
-        try:
-            notion_update_last_watered(notion_page_id, local_date)
-            updated += 1
-            print(f"Updated Notion Last Watered = {local_date} for: {name}")
-        except Exception as e:
-            print(f"FAILED updating Notion for {name} ({notion_page_id}): {e}")
+        success = False
+        for attempt in range(1, 4):
+            try:
+                notion_update_last_watered(notion_page_id, local_date)
+                success = True
+                updated += 1
+                print(f"Updated Notion Last Watered = {local_date} for: {name}")
+                break
+            except Exception as e:
+                print(f"Attempt {attempt}/3 FAILED for {name} ({notion_page_id}): {e}")
+                if attempt < 3:
+                    time.sleep(2 ** attempt)
 
-        processed_ids.append(tid)
+        if success:
+            processed_ids.append(tid)
+        else:
+            print(f"GIVING UP on {name} ({notion_page_id}) — will retry next run")
 
     # Cap processed list so it doesn't grow forever
     processed_ids = processed_ids[-2000:]

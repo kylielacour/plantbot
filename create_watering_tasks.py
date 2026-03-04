@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 import os
+import re
 import subprocess
 import datetime as dt
+from typing import Any
+
 import requests
-from typing import Dict, Any, Optional
 
 # ===== Config (from .env) =====
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
-THINGS_PROJECT = os.environ.get("THINGS_PROJECT", "Plant Care")
+THINGS_PROJECT = os.environ.get("THINGS_PROJECT_NAME", "Plant Care")
 
 PROP_NAME = os.environ.get("PROP_NAME", "Name")
 PROP_NEXT_WATERING = os.environ.get("PROP_NEXT_WATERING", "Next Watering")
@@ -48,7 +50,7 @@ def ml_to_cups_str(ml: float) -> str:
     return "0 cups"
 
 # ===== Helpers =====
-def notion_headers() -> Dict[str, str]:
+def notion_headers() -> dict[str, str]:
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Notion-Version": NOTION_VERSION,
@@ -58,7 +60,7 @@ def notion_headers() -> Dict[str, str]:
 def escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
-def get_title(props: Dict[str, Any]) -> str:
+def get_title(props: dict[str, Any]) -> str:
     p = props.get(PROP_NAME)
     if p and p.get("type") == "title":
         return "".join(x.get("plain_text", "") for x in p.get("title", [])).strip()
@@ -69,7 +71,19 @@ def get_title(props: Dict[str, Any]) -> str:
 
     return "Untitled Plant"
 
-def get_number(props: Dict[str, Any], name: str) -> Optional[float]:
+def get_date(props: dict[str, Any], name: str) -> str | None:
+    p = props.get(name)
+    if not p:
+        return None
+    if p.get("type") == "date" and p.get("date"):
+        return p["date"].get("start")
+    if p.get("type") == "formula":
+        f = p.get("formula", {})
+        if f.get("type") == "date" and f.get("date"):
+            return f["date"].get("start")
+    return None
+
+def get_number(props: dict[str, Any], name: str) -> float | None:
     p = props.get(name)
     if not p:
         return None
@@ -91,25 +105,32 @@ def get_number(props: Dict[str, Any], name: str) -> Optional[float]:
     return None
 
 # ===== Things (dedupe by notion_id) =====
-def task_exists_for_notion_id(page_id: str) -> bool:
+def get_open_notion_ids() -> set[str]:
     applescript = f'''
 tell application "Things3"
   tell project "{escape(THINGS_PROJECT)}"
-    return exists (to dos whose notes contains "notion_id: {page_id}" and status is open)
+    set ids to {{}}
+    repeat with t in (to dos whose status is open)
+      set n to notes of t
+      if n contains "notion_id:" then
+        set end of ids to n
+      end if
+    end repeat
+    return ids
   end tell
 end tell
 '''
     p = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True)
-    return "true" in (p.stdout or "").lower()
+    return {m.group(1) for m in re.finditer(r"notion_id:\s*([\w-]+)", p.stdout or "")}
 
-def create_things_task_due_today(title: str, notes: str) -> None:
+def create_things_task(title: str, notes: str, days_offset: int = 0) -> None:
     applescript = f'''
 tell application "Things3"
   tell project "{escape(THINGS_PROJECT)}"
     set newTodo to make new to do
     set name of newTodo to "{escape(title)}"
     set notes of newTodo to "{escape(notes)}"
-    set due date of newTodo to (current date)
+    set due date of newTodo to ((current date) + ({days_offset} * days))
   end tell
 end tell
 '''
@@ -139,11 +160,13 @@ def main() -> None:
 
     print(f"Notion rows returned: {len(results)}")
 
+    open_notion_ids = get_open_notion_ids()
+
     for page in results:
         page_id = page["id"]
         props = page.get("properties", {})
 
-        if task_exists_for_notion_id(page_id):
+        if page_id in open_notion_ids:
             print("SKIP (dedupe):", page_id)
             continue
 
@@ -153,7 +176,7 @@ def main() -> None:
         if ml is not None:
             ml_rounded = int(round(ml))
             ml_str = f"{ml_rounded} ml"
-            title_amount = ml_to_cups_str(float(ml_rounded))
+            title_amount = ml_to_cups_str(ml_rounded)
         else:
             ml_str = "ml?"
             title_amount = "amount?"
@@ -166,9 +189,16 @@ def main() -> None:
             f"notion_id: {page_id}"
         )
 
+        next_water_str = get_date(props, PROP_NEXT_WATERING)
+        if next_water_str:
+            due_date = dt.date.fromisoformat(next_water_str[:10])
+            days_offset = (due_date - dt.date.today()).days
+        else:
+            days_offset = 0
+
         print("READY:", task_title)
 
-        create_things_task_due_today(task_title, notes)
+        create_things_task(task_title, notes, days_offset)
 
 if __name__ == "__main__":
     main()
