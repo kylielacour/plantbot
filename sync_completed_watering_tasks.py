@@ -214,5 +214,15 @@ def main():
     print(f"Processed {updated} updates. State saved to {STATE_FILE}")
 
 
+def notify_error(message: str) -> None:
+    subprocess.run([
+        "osascript", "-e",
+        f'display notification "{message}" with title "plantbot" sound name "Basso"',
+    ])
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        notify_error(f"Error: {e}")
+        raise

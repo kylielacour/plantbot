@@ -232,5 +232,15 @@ def main() -> None:
 
         create_things_task(task_title, notes, days_offset)
 
+def notify_error(message: str) -> None:
+    subprocess.run([
+        "osascript", "-e",
+        f'display notification "{message}" with title "plantbot" sound name "Basso"',
+    ])
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        notify_error(f"Error: {e}")
+        raise
