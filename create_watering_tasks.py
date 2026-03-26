@@ -123,6 +123,35 @@ end tell
     p = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True)
     return {m.group(1) for m in re.finditer(r"notion_id:\s*([\w-]+)", p.stdout or "")}
 
+
+def get_recently_completed_notion_ids(days: int = 2) -> set[str]:
+    """Check Logbook for tasks completed within the last N days to avoid
+    re-creating a task before the sync script updates Notion."""
+    applescript = f'''
+tell application "Things3"
+  set cutoff to (current date) - ({days} * days)
+  set lb to to dos of list "Logbook"
+  set ids to {{}}
+  set maxIndex to 200
+  set n to count of lb
+  if maxIndex > n then set maxIndex to n
+  repeat with i from 1 to maxIndex
+    set t to item i of lb
+    try
+      if (completion date of t) > cutoff then
+        set tn to notes of t
+        if tn contains "notion_id:" then
+          set end of ids to tn
+        end if
+      end if
+    end try
+  end repeat
+  return ids
+end tell
+'''
+    p = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True)
+    return {m.group(1) for m in re.finditer(r"notion_id:\s*([\w-]+)", p.stdout or "")}
+
 def create_things_task(title: str, notes: str, days_offset: int = 0) -> None:
     applescript = f'''
 tell application "Things3"
@@ -161,13 +190,16 @@ def main() -> None:
     print(f"Notion rows returned: {len(results)}")
 
     open_notion_ids = get_open_notion_ids()
+    recent_notion_ids = get_recently_completed_notion_ids(days=2)
+    skip_ids = open_notion_ids | recent_notion_ids
 
     for page in results:
         page_id = page["id"]
         props = page.get("properties", {})
 
-        if page_id in open_notion_ids:
-            print("SKIP (dedupe):", page_id)
+        if page_id in skip_ids:
+            reason = "open task" if page_id in open_notion_ids else "recently completed"
+            print(f"SKIP ({reason}):", page_id)
             continue
 
         plant_name = get_title(props)
@@ -200,5 +232,15 @@ def main() -> None:
 
         create_things_task(task_title, notes, days_offset)
 
+def notify_error(message: str) -> None:
+    subprocess.run([
+        "osascript", "-e",
+        f'display notification "{message}" with title "plantbot" sound name "Basso"',
+    ])
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        notify_error(f"Error: {e}")
+        raise
