@@ -2,16 +2,15 @@
 """Plantbot editor + API server (runs on benedict).
 
 The always-on source of truth for plant data. Serves:
-  GET  /                 editable table of all plants + live computed schedule
+  GET  /                 card editor + live computed schedule
   GET  /api/plants       raw plant config (JSON)          [Mac fetches this]
   POST /api/plants       overwrite plant config           [editor Save]
   GET  /api/state        last_watered per plant (JSON)    [Mac fetches this]
   POST /api/last_watered {plant_id, date}                 [Mac reports completions]
-  GET  /api/schedule     computed interval + amount per plant (live climate + OPB)
+  GET  /api/schedule     computed interval + amount + ideal needs per plant
   GET  /api/climate      current climate + source
 
-Plant data lives in plants.yaml; last_watered in state/watering_state.json —
-the same files the model already uses, so nothing else changes.
+Plant data lives in plants.yaml; last_watered in state/watering_state.json.
 """
 from __future__ import annotations
 
@@ -111,6 +110,7 @@ def api_schedule():
         last = state.get_last_watered(plant.id)
         rec = watering_model.watering_recommendation(
             plant, species, cond, last, today, LATITUDE)
+        band = watering_model.sun_band(plant.sun)
         out.append({
             "id": plant.id, "name": plant.name,
             "interval_days": rec.interval_days,
@@ -121,6 +121,10 @@ def api_schedule():
             "explanation": rec.explanation,
             "warnings": rec.warnings,
             "last_watered": last.isoformat() if last else None,
+            "water_use": plant.water_use,
+            "sun": plant.sun,
+            "current_lux": round(plant.light_lux) if plant.light_lux is not None else None,
+            "ideal_lux": ({"min": band[0], "ideal": band[1], "max": band[2]} if band else None),
         })
     return jsonify(out)
 
@@ -130,69 +134,85 @@ def index():
     return PAGE
 
 
-PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
+PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Plantbot</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🪴</text></svg>">
 <style>
-:root{color-scheme:light dark}
-body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:1rem;max-width:1100px;margin:auto;line-height:1.4}
-h1{font-size:1.4rem;font-weight:600}
-#climate{color:#666;font-size:.9rem;margin-bottom:1rem}
-table{border-collapse:collapse;width:100%;font-size:.85rem}
-th,td{border-bottom:1px solid #8883;padding:6px 5px;text-align:left;vertical-align:top}
-th{font-weight:600;position:sticky;top:0;background:Canvas}
-input,select{font:inherit;padding:4px 6px;border:1px solid #8886;border-radius:6px;background:Field;color:FieldText;width:100%;box-sizing:border-box}
-input[type=checkbox]{width:auto}
-td.calc{white-space:nowrap;color:#2a7}
-td.warn{color:#c73}
-.sched{font-weight:600}
-.wrap{overflow-x:auto}
-button{font:inherit;padding:8px 16px;border:1px solid #8886;border-radius:8px;background:Field;color:FieldText;cursor:pointer}
-button.primary{background:#2a7;color:#fff;border-color:#2a7}
-.bar{position:sticky;bottom:0;background:Canvas;padding:12px 0;display:flex;gap:10px;align-items:center;border-top:1px solid #8883;margin-top:8px}
-#status{color:#666;font-size:.9rem}
-.narrow{width:78px}.mid{width:120px}
-button.tune{padding:4px 9px;font-size:.8rem;white-space:nowrap}
-.overlay{position:fixed;inset:0;background:#0008;display:flex;align-items:center;justify-content:center;z-index:10;padding:12px}
-.panel{background:Canvas;color:CanvasText;border:1px solid #8886;border-radius:12px;padding:16px;max-width:460px;width:100%;max-height:92vh;overflow:auto}
-.phead{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
-.phead b{font-size:1.1rem}
-.mgrid label{display:block;font-size:.82rem;color:#666;margin:11px 0 3px}
+:root{--card:#fff;--ink:#1a1c1a;--muted:#70746e;--line:#e7e7e2;--accent:#2f9e6f;--accent-soft:#e9f6ef;--warn:#b06a25;--warn-soft:#f7efe1;--danger:#bd4438;--danger-soft:#fbeae7;--radius:14px}
+@media (prefers-color-scheme:dark){:root{--card:#1b1d1b;--ink:#e8eae6;--muted:#969b93;--line:#31352e;--accent:#5cc999;--accent-soft:#1d3a2d;--warn:#e0a061;--warn-soft:#33291b;--danger:#e2776d;--danger-soft:#38231f}}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:var(--ink);-webkit-font-smoothing:antialiased}
+.wrap{max-width:1100px;margin:0 auto;padding:22px 16px 100px}
+h1{font-size:1.5rem;font-weight:650;margin:0;letter-spacing:-.02em}
+.climate{color:var(--muted);font-size:.9rem;margin-top:2px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-top:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:15px 16px;display:flex;flex-direction:column;gap:9px}
+.chead{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.card h2{font-size:1.05rem;margin:0;font-weight:600;letter-spacing:-.01em}
+.sched{font-size:1.05rem;font-weight:600}
+.sched .amt{color:var(--accent)}
+.meta{color:var(--muted);font-size:.8rem}
+.due{font-size:.7rem;font-weight:600;padding:2px 9px;border-radius:20px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
+.due.now{background:var(--danger-soft);color:var(--danger)}
+.pills{display:flex;gap:6px;flex-wrap:wrap}
+.pill{font-size:.72rem;padding:2px 9px;border-radius:20px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}
+.needs{border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:8px}
+.lightrow{font-size:.76rem;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.track{position:relative;height:8px;border-radius:6px;background:var(--line)}
+.zone{position:absolute;top:0;bottom:0;background:var(--accent-soft);border-radius:6px}
+.mark{position:absolute;top:-3px;width:3px;height:14px;border-radius:2px;background:var(--accent);transform:translateX(-1px)}
+.mark.dim{background:var(--danger)}.mark.bright{background:var(--warn)}
+.nolight{font-size:.76rem;color:var(--muted)}
+.edit{align-self:flex-start;margin-top:2px;font:inherit;font-size:.82rem;padding:6px 14px;border:1px solid var(--line);border-radius:9px;background:transparent;color:var(--ink);cursor:pointer}
+.edit:hover{border-color:var(--accent);color:var(--accent)}
+.savebar{position:sticky;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:12px 16px;display:flex;gap:10px;align-items:center}
+.savebar .inner{max-width:1100px;margin:0 auto;width:100%;display:flex;gap:10px;align-items:center}
+button.btn{font:inherit;padding:9px 16px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--ink);cursor:pointer}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600}
+#status{color:var(--muted);font-size:.85rem}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:20;padding:14px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;max-width:460px;width:100%;max-height:92vh;overflow:auto}
+.phead{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.phead b{font-size:1.15rem}
+.x{border:none;background:transparent;color:var(--muted);font-size:1.2rem;cursor:pointer}
+.mgrid label{display:block;font-size:.8rem;color:var(--muted);margin:11px 0 3px}
 .mgrid input[type=range]{width:100%}
-.mgrid select{width:100%}
-.mgrid hr{border:none;border-top:1px solid #8883;margin:14px 0 2px}
-.mout{display:flex;gap:12px;margin:14px 0 6px}
-.metric{flex:1;background:#8881;border-radius:8px;padding:10px}
-.metric small{color:#666}.metric b{font-size:1.4rem;display:block}
-.fbar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:.78rem}
-.fbar .nm{width:78px;color:#666}
-.fbar .tr{flex:1;height:6px;background:#8882;border-radius:4px;overflow:hidden}
-.fbar .fl{height:100%;background:#2a7}.fbar .vl{width:42px;text-align:right}
-.hint{font-size:.8rem;color:#666;margin:8px 0 0}
+.mgrid input[type=number],.mgrid select{width:100%;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--ink)}
+.mgrid .hint{font-size:.74rem;color:var(--muted);margin-top:8px}
+.mout{display:flex;gap:10px;margin:15px 0 4px}
+.metric{flex:1;background:var(--accent-soft);border-radius:11px;padding:11px 12px}
+.metric small{color:var(--muted);font-size:.72rem}.metric b{display:block;font-size:1.35rem;margin-top:1px}
+.fbar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:.76rem}
+.fbar .nm{width:76px;color:var(--muted)}
+.fbar .tr{flex:1;height:6px;background:var(--line);border-radius:4px;overflow:hidden}
+.fbar .fl{height:100%;background:var(--accent)}.fbar .vl{width:42px;text-align:right}
 .mbtns{display:flex;gap:10px;margin-top:14px}
 </style></head><body>
-<h1>🌱 Plantbot</h1>
-<div id=climate>loading climate…</div>
-<div class=wrap><table id=tbl><thead><tr>
-<th>Name</th><th>Species (pid)</th><th class=narrow>Soil ml</th><th class=mid>Soil</th>
-<th class=narrow>Lux</th><th class=mid>Water use</th><th class=mid>Growth</th><th class=narrow>Drain</th>
-<th>When</th><th>Amount</th><th></th></tr></thead><tbody id=rows></tbody></table></div>
-<div class=bar>
-  <button class=primary id=save>Save changes</button>
-  <button id=add>Add plant</button>
-  <span id=status>Save to update the schedule</span>
+<div class=wrap>
+  <header><h1>🪴 Plantbot</h1><div class=climate id=climate>loading…</div></header>
+  <div class=grid id=grid></div>
 </div>
+<div class=savebar><div class=inner>
+  <button class="btn primary" id=save>Save changes</button>
+  <button class="btn" id=add>Add plant</button>
+  <span id=status>Adjust a plant, then Save</span>
+</div></div>
+
 <div id=modal class=overlay style="display:none"><div class=panel>
-  <div class=phead><b id=m-title></b><button id=m-close>✕</button></div>
+  <div class=phead><b id=m-title></b><button class=x id=m-close>&times;</button></div>
   <div class=mgrid>
+    <label>Name</label><input type=text id=m-name>
+    <label>Species (Open Plantbook pid)</label><input type=text id=m-pid placeholder="(none)">
     <label>Soil volume — <span id=m-volout></span></label><input type=range id=m-vol min=100 max=25000 step=50>
-    <label>Soil type</label><select id=m-soil><option>standard</option><option>peat</option><option>coco</option><option>aroid</option><option>cactus</option><option>moisture</option></select>
-    <label>Light — <span id=m-luxout></span> lux (<span id=m-luxword></span>)</label><input type=range id=m-lux min=0 max=1000 step=1>
-    <label>Water use</label><select id=m-wu><option>low</option><option>medium</option><option>high</option></select>
-    <label>Growth</label><select id=m-grow><option>auto</option><option>active</option><option>dormant</option></select>
-    <label><input type=checkbox id=m-drain> has drainage hole</label>
-    <hr><div class=hint>Conditions below are a preview — the saved schedule uses live climate.</div>
+    <label>Soil type</label><select id=m-soil></select>
+    <label>Measured light — <span id=m-luxout></span> lux (<span id=m-luxword></span>)</label><input type=range id=m-lux min=0 max=1000 step=1>
+    <label>Sun requirement (garden.org)</label><select id=m-sun></select>
+    <label>Water preference (garden.org)</label><select id=m-wu></select>
+    <label>Growth</label><select id=m-grow></select>
+    <label><input type=checkbox id=m-drain style="width:auto"> has a drainage hole</label>
+    <div class=hint>Temp / humidity / month below are a what-if preview — the saved schedule always uses live climate.</div>
     <label>Temp — <span id=m-tempout></span> °F</label><input type=range id=m-temp min=50 max=95 step=1>
     <label>Humidity — <span id=m-humout></span>%</label><input type=range id=m-hum min=10 max=90 step=1>
     <label>Month — <span id=m-monthout></span></label><input type=range id=m-month min=1 max=12 step=1>
@@ -202,129 +222,111 @@ button.tune{padding:4px 9px;font-size:.8rem;white-space:nowrap}
     <div class=metric><small>Give it</small><b id=m-amount></b></div>
   </div>
   <div id=m-factors></div>
-  <p class=hint id=m-explain></p>
-  <div class=mbtns><button class=primary id=m-apply>Apply</button><button id=m-cancel>Cancel</button></div>
+  <div class=mbtns><button class="btn primary" id=m-apply>Apply</button><button class="btn" id=m-cancel>Cancel</button></div>
 </div></div>
-<script>
-var SOILS=["standard","peat","coco","aroid","cactus","moisture"];
-var WU=["low","medium","high"];
-var GROW=["auto","active","dormant"];
-var plants=[],sched={};
-var climF=72,climHum=50,curMonth=new Date().getMonth()+1,mId=null;
-function $(id){return document.getElementById(id);}
-function opt(v,list){return list.map(function(x){return '<option'+(x===v?' selected':'')+'>'+x+'</option>';}).join('');}
-function esc(s){return (s==null?'':String(s)).replace(/"/g,'&quot;');}
-function row(p){
-  var s=sched[p.id]||{};
-  var when=s.interval_days?('every '+s.interval_days+'d'+(s.due_in<=0?' — due now':' ('+s.due_in+'d)')):'—';
-  var warn=(s.warnings&&s.warnings.length)?'<div class=warn>⚠ '+s.warnings.join('; ')+'</div>':'';
-  return '<tr data-id="'+esc(p.id)+'">'
-   +'<td><input class=f-name value="'+esc(p.name)+'"></td>'
-   +'<td><input class=f-pid value="'+esc(p.pid)+'" placeholder="(none)"></td>'
-   +'<td><input class="f-vol narrow" type=number value="'+esc(p.soil_volume_ml)+'"></td>'
-   +'<td><select class="f-soil mid">'+opt(p.soil_type||"standard",SOILS)+'</select></td>'
-   +'<td><input class="f-lux narrow" type=number value="'+esc(p.light_lux)+'"></td>'
-   +'<td><select class="f-wu mid">'+opt(p.water_use||"medium",WU)+'</select></td>'
-   +'<td><select class="f-grow mid">'+opt(p.growth_state||"auto",GROW)+'</select></td>'
-   +'<td><input class=f-drain type=checkbox '+(p.has_drainage!==false?'checked':'')+'></td>'
-   +'<td class="calc sched">'+when+warn+'</td>'
-   +'<td class=calc>'+(s.amount_str||'—')+'</td>'
-   +'<td><button type=button class=tune>⚙ Tune</button></td></tr>';
-}
-function render(){document.getElementById('rows').innerHTML=plants.map(row).join('');}
-function collect(){
-  var out=[];
-  document.querySelectorAll('#rows tr').forEach(function(tr){
-    var g=function(c){return tr.querySelector(c);};
-    var pid=g('.f-pid').value.trim();
-    var lux=g('.f-lux').value.trim();
-    out.push({id:tr.getAttribute('data-id'),name:g('.f-name').value.trim(),
-      pid:pid||null,soil_volume_ml:parseFloat(g('.f-vol').value)||null,
-      soil_type:g('.f-soil').value,light_lux:lux?parseFloat(lux):null,
-      water_use:g('.f-wu').value,growth_state:g('.f-grow').value,
-      has_drainage:g('.f-drain').checked});
-  });
-  return out;
-}
-function setStatus(t){document.getElementById('status').textContent=t;}
-function loadSchedule(){
-  return fetch('api/schedule').then(function(r){return r.json();}).then(function(list){
-    sched={};list.forEach(function(s){sched[s.id]=s;});render();});
-}
-function loadClimate(){fetch('api/climate').then(function(r){return r.json();}).then(function(c){
-  var tf=Math.round(c.temp_c*9/5+32);climF=tf;climHum=Math.round(c.humidity_pct);
-  document.getElementById('climate').textContent='Climate: '+c.source+' — '+tf+'°F / '+c.humidity_pct+'% RH';});}
-function loadAll(){fetch('api/plants').then(function(r){return r.json();}).then(function(d){
-  plants=d.plants||[];render();loadSchedule();loadClimate();});}
-document.getElementById('save').onclick=function(){
-  setStatus('saving…');
-  fetch('api/plants',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({plants:collect()})}).then(function(r){return r.json();}).then(function(res){
-    if(res.error){setStatus('error: '+res.error);return;}
-    setStatus('saved '+res.count+' plants');loadSchedule();});
-};
-document.getElementById('add').onclick=function(){
-  var id=prompt('Short id for the new plant (e.g. new-fern):');if(!id)return;
-  plants=collect();plants.push({id:id,name:id,pid:null,soil_volume_ml:1000,soil_type:'standard',
-    light_lux:4000,water_use:'medium',growth_state:'auto',has_drainage:true});render();
-  setStatus('added — remember to Save');
-};
 
-var AWC={standard:.35,peat:.38,coco:.40,aroid:.28,cactus:.22,moisture:.45},
-    MAD={low:.9,medium:.5,high:.35},KC={low:.3,medium:1,high:1.45},
-    ET=0.0215,CAP=0.08,ND=0.8,LAT=40,MLCUP=236.588,MLTB=14.7868,
-    MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+<script>
+var SOIL=["standard","peat","coco","aroid","cactus","moisture"];
+var GROW=["auto","active","dormant"];
+var WU=[["dry","Dry"],["dry_mesic","Dry-Mesic"],["mesic","Mesic"],["wet_mesic","Wet-Mesic"],["wet","Wet"]];
+var SUN=[["","— not set —"],["full_sun","Full sun"],["sun_to_part_shade","Sun – part shade"],["part_shade","Part / dappled shade"],["part_to_full_shade","Part – full shade"],["full_shade","Full shade"]];
+var WU_ALIAS={low:"dry",medium:"mesic",high:"wet"};
+var AWC={standard:.35,peat:.38,coco:.40,aroid:.28,cactus:.22,moisture:.45};
+var KC={dry:.30,dry_mesic:.55,mesic:1.0,wet_mesic:1.25,wet:1.45,low:.30,medium:1.0,high:1.45};
+var MAD={dry:.90,dry_mesic:.70,mesic:.50,wet_mesic:.40,wet:.30,low:.90,medium:.50,high:.30};
+var POUR={dry:.06,dry_mesic:.07,mesic:.08,wet_mesic:.09,wet:.10,low:.06,medium:.08,high:.10};
+var ET=0.0215,ND=0.8,LAT=40,MLCUP=236.588,MLTB=14.7868;
+var MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+var plants=[],sched={},climF=72,climHum=50,curMonth=new Date().getMonth()+1,mId=null;
+function $(id){return document.getElementById(id);}
+function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x));}
 function svp(t){return 0.6108*Math.exp(17.27*t/(t+237.3));}
 var VREF=svp(21)*0.5;
-function clamp(x,a,b){return Math.max(a,Math.min(b,x));}
 function luxF(l){return clamp(0.55*Math.log10(Math.max(l,1))-1.05,0.5,1.7);}
 function dayLen(d){var dec=23.45*Math.sin(2*Math.PI*(284+d)/365)*Math.PI/180,p=LAT*Math.PI/180,c=-Math.tan(p)*Math.tan(dec);if(c>=1)return 0;if(c<=-1)return 24;return 2*Math.acos(c)*180/Math.PI/15;}
 function luxWord(l){return l<2500?'dim':l<7000?'moderate':l<20000?'bright indirect':'direct sun';}
 function luxFromSlider(v){return Math.round(Math.pow(10,2+(v/1000)*3));}
-function sliderFromLux(l){return Math.round((Math.log10(Math.max(l,100))-2)/3*1000);}
+function sliderFromLux(l){return Math.round((Math.log10(Math.max(l||4000,100))-2)/3*1000);}
+function luxPos(l){return clamp((Math.log10(Math.max(l||1,50))-2)/3,0,1)*100;}
+function normWU(v){v=(v||'mesic');return WU_ALIAS[v]||v;}
+function fmtLux(l){return l>=1000?Math.round(l/1000)+'k':l;}
 function cups(ml){if(ml<0.25*MLCUP){var t=ml/MLTB;return t<1?Math.round(ml)+' ml':Math.round(t)+' tbsp';}
   var F=[[0,''],[.25,'¼'],[1/3,'⅓'],[.5,'½'],[2/3,'⅔'],[.75,'¾'],[1,'']],c=ml/MLCUP,w=Math.floor(c),r=c-w,b=F[0];
   F.forEach(function(f){if(Math.abs(r-f[0])<Math.abs(r-b[0]))b=f;});var fv=b[0],fs=b[1];
   if(fv>=0.99){w++;fs='';}if(w===0&&fs)return fs+' cup';if(w>0&&fs)return w+fs+' cups';if(w>0)return w===1?'1 cup':w+' cups';return '0 cups';}
+function label(list,key){for(var i=0;i<list.length;i++)if(list[i][0]===key)return list[i][1];return key;}
+
+function lightBar(cur,ideal){
+  if(!ideal) return '<div class=nolight>Sun requirement not set</div>';
+  var status=cur==null?'':(cur<ideal.min?'dim':(cur>ideal.max?'bright':''));
+  var mark=cur==null?'':'<span class="mark '+status+'" style="left:'+luxPos(cur)+'%"></span>';
+  return '<div class=track><span class=zone style="left:'+luxPos(ideal.min)+'%;width:'+(luxPos(ideal.max)-luxPos(ideal.min))+'%"></span>'+mark+'</div>';
+}
+function card(p){
+  var s=sched[p.id]||{};
+  var due=s.due_in<=0?'<span class="due now">due now</span>':'<span class=due>in '+s.due_in+'d</span>';
+  var warns=(s.warnings||[]).map(function(w){return '<span class="pill warn">⚠ '+esc(w)+'</span>';}).join('');
+  var idl=s.ideal_lux;
+  var lr=idl?('current '+(s.current_lux!=null?fmtLux(s.current_lux):'—')+' · ideal '+fmtLux(idl.min)+'–'+fmtLux(idl.max)+' lux'):'no ideal set';
+  var needPills='<span class=pill>💧 '+esc(label(WU,normWU(s.water_use)))+'</span>'+(s.sun?'<span class=pill>☀ '+esc(label(SUN,s.sun))+'</span>':'');
+  return '<div class=card><div class=chead><h2>'+esc(p.name)+'</h2>'+(s.interval_days?due:'')+'</div>'
+    +'<div class=sched>💧 every '+(s.interval_days||'—')+' days · <span class=amt>'+(s.amount_str||'—')+'</span></div>'
+    +'<div class=meta>last watered '+(s.last_watered||'never')+'</div>'
+    +(warns?'<div class=pills>'+warns+'</div>':'')
+    +'<div class=needs><div class=lightrow><span>Light</span><span>'+lr+'</span></div>'+lightBar(s.current_lux,idl)+'<div class=pills>'+needPills+'</div></div>'
+    +'<button class=edit data-id="'+esc(p.id)+'">Adjust</button></div>';
+}
+function render(){$('grid').innerHTML=plants.map(card).join('');}
+function selOpts(list){return list.map(function(o){var k=Array.isArray(o)?o[0]:o,t=Array.isArray(o)?o[1]:o;return '<option value="'+esc(k)+'">'+esc(t)+'</option>';}).join('');}
+
+function setStatus(t){$('status').textContent=t;}
+function loadSchedule(){return fetch('api/schedule').then(function(r){return r.json();}).then(function(list){sched={};list.forEach(function(s){sched[s.id]=s;});render();});}
+function loadClimate(){fetch('api/climate').then(function(r){return r.json();}).then(function(c){
+  var tf=Math.round(c.temp_c*9/5+32);climF=tf;climHum=Math.round(c.humidity_pct);
+  $('climate').textContent='Climate: '+c.source+' — '+tf+'°F / '+c.humidity_pct+'% RH';});}
+function loadAll(){fetch('api/plants').then(function(r){return r.json();}).then(function(d){plants=d.plants||[];render();loadSchedule();loadClimate();});}
+
+$('save').onclick=function(){setStatus('saving…');
+  fetch('api/plants',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plants:plants})})
+  .then(function(r){return r.json();}).then(function(res){if(res.error){setStatus('error: '+res.error);return;}setStatus('saved '+res.count+' plants');loadSchedule();});};
+$('add').onclick=function(){var id=prompt('Short id for the new plant (e.g. new-fern):');if(!id)return;
+  plants.push({id:id,name:id,pid:null,soil_volume_ml:1000,soil_type:'standard',light_lux:4000,sun:'part_shade',water_use:'mesic',growth_state:'auto',has_drainage:true});render();setStatus('added — Adjust it, then Save');};
+
+$('m-soil').innerHTML=selOpts(SOIL);$('m-grow').innerHTML=selOpts(GROW);$('m-wu').innerHTML=selOpts(WU);$('m-sun').innerHTML=selOpts(SUN);
+
 function fbar(nm,m){var w=clamp(m/2*100,0,100);return '<div class=fbar><span class=nm>'+nm+'</span><span class=tr><span class=fl style="width:'+w.toFixed(0)+'%"></span></span><span class=vl>'+m.toFixed(2)+'×</span></div>';}
 function computeTune(){
-  var vol=+$('m-vol').value,soil=$('m-soil').value,lux=luxFromSlider(+$('m-lux').value),
-      wu=$('m-wu').value,grow=$('m-grow').value,drain=$('m-drain').checked,
-      tF=+$('m-temp').value,hum=+$('m-hum').value,mo=+$('m-month').value,tC=(tF-32)*5/9,doy=Math.round((mo-0.5)*30.42);
+  var vol=+$('m-vol').value,soil=$('m-soil').value,lux=luxFromSlider(+$('m-lux').value),wu=$('m-wu').value,grow=$('m-grow').value,drain=$('m-drain').checked;
+  var tF=+$('m-temp').value,hum=+$('m-hum').value,mo=+$('m-month').value,tC=(tF-32)*5/9,doy=Math.round((mo-0.5)*30.42);
   $('m-volout').textContent=vol>=1000?(vol/1000).toFixed(1)+' L':vol+' ml';
   $('m-luxout').textContent=lux;$('m-luxword').textContent=luxWord(lux);
   $('m-tempout').textContent=tF;$('m-humout').textContent=hum;$('m-monthout').textContent=MON[mo-1];
   var fv=clamp(svp(tC)*(1-hum/100)/VREF,0.4,2.5),fl=luxF(lux),L=dayLen(doy),
       fs=clamp(0.5+0.5*(L/12),0.5,1.4),fg=grow==='active'?1:grow==='dormant'?0.4:clamp(0.4+0.6*(L-9)/5,0.4,1),kc=KC[wu]||1;
-  var dep=vol*(AWC[soil]||.35)*(MAD[wu]||.5),amt=Math.min(dep,CAP*vol)*(drain?1:ND),
+  var dep=vol*(AWC[soil]||.35)*(MAD[wu]||.5),amt=(POUR[wu]||.08)*vol*(drain?1:ND),
       loss=Math.max(ET*vol*fv*fl*fs*fg*kc,0.1),iv=Math.round(clamp(dep/loss,2,30));
   $('m-interval').textContent=iv;$('m-amount').textContent=cups(amt);
   $('m-factors').innerHTML=fbar('dryness',fv)+fbar('light',fl)+fbar('season',fs)+fbar('growth',fg)+fbar('water-use',kc);
-  $('m-explain').textContent='~'+Math.round(loss)+' ml/day lost · refill '+Math.round(amt)+' ml';
 }
-function openTune(id){
-  plants=collect();var p=plants.filter(function(x){return x.id===id;})[0];if(!p)return;mId=id;
-  $('m-title').textContent=p.name;$('m-vol').value=p.soil_volume_ml||1000;$('m-soil').value=p.soil_type||'standard';
-  $('m-lux').value=sliderFromLux(p.light_lux||4000);$('m-wu').value=p.water_use||'medium';
+function openTune(id){var p=plants.filter(function(x){return x.id===id;})[0];if(!p)return;mId=id;
+  $('m-title').textContent=p.name||id;$('m-name').value=p.name||'';$('m-pid').value=p.pid||'';
+  $('m-vol').value=p.soil_volume_ml||1000;$('m-soil').value=p.soil_type||'standard';
+  $('m-lux').value=sliderFromLux(p.light_lux||4000);$('m-sun').value=p.sun||'';$('m-wu').value=normWU(p.water_use);
   $('m-grow').value=p.growth_state||'auto';$('m-drain').checked=p.has_drainage!==false;
   $('m-temp').value=climF;$('m-hum').value=climHum;$('m-month').value=curMonth;
-  computeTune();$('modal').style.display='flex';
-}
+  computeTune();$('modal').style.display='flex';}
 function closeTune(){$('modal').style.display='none';}
-function applyTune(){
-  var p=plants.filter(function(x){return x.id===mId;})[0];if(p){
+function applyTune(){var p=plants.filter(function(x){return x.id===mId;})[0];if(p){
+    p.name=$('m-name').value.trim()||p.id;p.pid=$('m-pid').value.trim()||null;
     p.soil_volume_ml=+$('m-vol').value;p.soil_type=$('m-soil').value;p.light_lux=luxFromSlider(+$('m-lux').value);
-    p.water_use=$('m-wu').value;p.growth_state=$('m-grow').value;p.has_drainage=$('m-drain').checked;
-    render();setStatus('updated '+p.name+' — Save to persist');}
-  closeTune();
-}
-document.getElementById('rows').addEventListener('click',function(e){
-  if(e.target.closest('.tune')){var tr=e.target.closest('tr');if(tr)openTune(tr.getAttribute('data-id'));}});
-['m-vol','m-soil','m-lux','m-wu','m-grow','m-drain','m-temp','m-hum','m-month'].forEach(function(id){
-  $(id).addEventListener('input',computeTune);});
+    p.sun=$('m-sun').value||null;p.water_use=$('m-wu').value;p.growth_state=$('m-grow').value;p.has_drainage=$('m-drain').checked;
+    render();setStatus('updated '+p.name+' — Save to persist');}closeTune();}
+
+$('grid').addEventListener('click',function(e){var b=e.target.closest('.edit');if(b)openTune(b.getAttribute('data-id'));});
+['m-vol','m-soil','m-lux','m-wu','m-grow','m-drain','m-temp','m-hum','m-month'].forEach(function(id){$(id).addEventListener('input',computeTune);});
 $('m-apply').onclick=applyTune;$('m-cancel').onclick=closeTune;$('m-close').onclick=closeTune;
 $('modal').addEventListener('click',function(e){if(e.target===$('modal'))closeTune();});
-
 loadAll();
 </script></body></html>"""
 

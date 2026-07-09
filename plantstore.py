@@ -85,7 +85,8 @@ def plant_entry_from_dict(raw: dict[str, Any]) -> PlantEntry:
         soil_type=str(raw.get("soil_type", "standard")),
         light=str(raw.get("light", "medium")),
         light_lux=_to_float(raw.get("light_lux")),
-        water_use=str(raw.get("water_use", "medium")),
+        sun=(str(raw["sun"]) if raw.get("sun") else None),
+        water_use=str(raw.get("water_use", "mesic")),
         growth_state=str(raw.get("growth_state", "auto")),
         has_drainage=bool(raw.get("has_drainage", True)),
     )

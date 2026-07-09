@@ -43,38 +43,60 @@ _ET_BASE_ML_PER_ML_SOIL = 0.0215
 MIN_INTERVAL_DAYS = 2
 MAX_INTERVAL_DAYS = 30
 
-# Per-plant water-use coefficient (transpiration intensity). This captures the
-# big difference OPB's soil-moisture band does NOT: a cactus and a fern in
-# identical pots dry at very different rates.
+# Water-use maps garden.org's "Water Preferences" scale to model coefficients.
+# Each state tunes BOTH frequency (via Kc + MAD) and amount (via pour fraction).
+# low/medium/high are kept as aliases of dry/mesic/wet for back-compatibility.
+#
+# Kc = transpiration intensity (a cactus loses far less water than a fern).
 WATER_USE_KC = {
-    "low": 0.3,      # cacti, succulents, sansevieria, ZZ (CAM — very low transpiration)
-    "medium": 1.0,   # pothos, monstera, most foliage
-    "high": 1.45,    # ferns, calathea, fittonia, thirsty growers
+    "dry": 0.30,        # cacti, succulents, sansevieria, ZZ
+    "dry_mesic": 0.55,  # drought-tolerant, likes to dry between waterings
+    "mesic": 1.00,      # most foliage (pothos, monstera)
+    "wet_mesic": 1.25,  # likes consistent moisture
+    "wet": 1.45,        # ferns, calathea, thirsty growers
+    "low": 0.30, "medium": 1.00, "high": 1.45,
 }
 
-# Management-allowed depletion (MAD) by water-use type: how much of the available
-# water we let the plant use before rewatering. Drought-tolerant plants are
-# watered deeply then allowed to dry right out; moisture-lovers are kept evenly
-# damp. This drives interval far more meaningfully than OPB's (coarse) band.
+# MAD = management-allowed depletion: how far we let the root zone dry before
+# rewatering (drives interval). Drought-lovers dry right out; wet-lovers stay damp.
 MAD_BY_WATER_USE = {
-    "low": 0.9,      # let it get bone dry
-    "medium": 0.5,
-    "high": 0.35,    # keep it damp
+    "dry": 0.90,
+    "dry_mesic": 0.70,
+    "mesic": 0.50,
+    "wet_mesic": 0.40,
+    "wet": 0.30,
+    "low": 0.90, "medium": 0.50, "high": 0.30,
 }
 
-# Light -> transpiration multiplier is computed from lux (measurable with a
-# phone light-meter app). Categories map to representative lux, used only when
-# no measured value is given.
+# Measured-pour size as a fraction of soil volume, by water preference (drives
+# amount): drier-preference plants get a smaller pour, wet-lovers a bigger soak.
+POUR_FRACTION_BY_WATER_USE = {
+    "dry": 0.06,
+    "dry_mesic": 0.07,
+    "mesic": 0.08,
+    "wet_mesic": 0.09,
+    "wet": 0.10,
+    "low": 0.06, "medium": 0.08, "high": 0.10,
+}
+_DEFAULT_POUR_FRACTION = 0.08
+
+# garden.org "Sun Requirements" -> (min, ideal, max) lux at the plant. Replaces
+# Open Plantbook's light band. Measured lux still drives the watering math; this
+# gives the default when unmeasured and the "too dark / too bright" warning.
+SUN_TO_LUX = {
+    "full_sun": (15000, 40000, 100000),
+    "sun_to_part_shade": (8000, 20000, 50000),
+    "part_shade": (4000, 10000, 25000),
+    "part_to_full_shade": (1000, 5000, 12000),
+    "full_shade": (400, 1500, 6000),
+}
+
+# Legacy light categories -> representative lux (fallback when no lux/sun given).
 CATEGORY_LUX = {
-    "low": 1500.0,      # a few feet from a window / north-facing
-    "medium": 4000.0,   # bright room, not right by glass
-    "bright": 12000.0,  # beside a bright window (bright indirect)
-    "direct": 40000.0,  # direct sun falling on the leaves
+    "low": 1500.0, "medium": 4000.0, "bright": 12000.0, "direct": 40000.0,
 }
 
-# Plant-available water capacity (AWC) as a fraction of soil volume, by soil
-# type: how much of the pot's volume is water the roots can actually use between
-# saturation and wilting. Peat/coir hold a lot; gritty cactus mixes little.
+# Plant-available water capacity (AWC) as a fraction of soil volume, by soil type.
 AWC_FRACTION = {
     "standard": 0.35,
     "peat": 0.38,
@@ -84,11 +106,6 @@ AWC_FRACTION = {
     "moisture": 0.45,   # water-retentive / self-watering mixes
 }
 _DEFAULT_AWC = 0.35
-
-# Cap a single pour to this fraction of soil volume — keeps us in "measured
-# pour" territory rather than soak-until-runoff. Lowered after real pours were
-# overflowing to the drainage pan (esp. large pots like the fiddle leaf).
-_POUR_CAP_FRACTION = 0.08
 
 # Safety factor on the pour for pots without drainage (avoid pooling).
 _NO_DRAINAGE_FACTOR = 0.8
@@ -126,9 +143,10 @@ class Plant:
     name: str
     soil_volume_ml: float
     soil_type: str = "standard"
-    light: str = "medium"            # category key, or a numeric lux via light_lux
-    light_lux: float | None = None
-    water_use: str = "medium"        # key into WATER_USE_KC
+    light: str = "medium"            # legacy category, superseded by light_lux/sun
+    light_lux: float | None = None   # measured lux at the plant (drives the math)
+    sun: str | None = None           # garden.org Sun Requirement (key into SUN_TO_LUX)
+    water_use: str = "mesic"         # key into WATER_USE_KC (garden.org Water Pref)
     growth_state: str = "auto"       # active | dormant | auto
     has_drainage: bool = True
 
@@ -174,6 +192,24 @@ def lux_to_factor(lux: float) -> float:
     return clamp(0.55 * math.log10(max(lux, 1.0)) - 1.05, 0.5, 1.7)
 
 
+def sun_band(sun: str | None) -> tuple[float, float, float] | None:
+    """(min, ideal, max) lux for a garden.org sun category, or None."""
+    return SUN_TO_LUX.get((sun or "").lower())
+
+
+def effective_lux(plant: Plant, conditions: "Conditions | None" = None) -> float:
+    """The lux to use for a plant: measured value first, then a live sensor, then
+    the garden.org sun default, then the legacy light category."""
+    if plant.light_lux is not None:
+        return plant.light_lux
+    if conditions is not None and conditions.lux is not None:
+        return conditions.lux
+    band = sun_band(plant.sun)
+    if band:
+        return band[1]
+    return CATEGORY_LUX.get((plant.light or "medium").lower(), CATEGORY_LUX["medium"])
+
+
 def light_factor(light: str, lux: float | None) -> float:
     if lux is None:
         lux = CATEGORY_LUX.get((light or "medium").lower(), CATEGORY_LUX["medium"])
@@ -203,7 +239,12 @@ def growth_factor(growth_state: str, date: dt.date, latitude_deg: float) -> floa
 
 
 def water_use_kc(water_use: str) -> float:
-    return WATER_USE_KC.get((water_use or "medium").lower(), 1.0)
+    return WATER_USE_KC.get((water_use or "mesic").lower(), 1.0)
+
+
+def water_use_pour_fraction(water_use: str) -> float:
+    return POUR_FRACTION_BY_WATER_USE.get(
+        (water_use or "mesic").lower(), _DEFAULT_POUR_FRACTION)
 
 
 # --------------------------------------------------------- derived quantities
@@ -232,7 +273,7 @@ def daily_loss_ml(plant: Plant, conditions: Conditions, date: dt.date,
                   latitude_deg: float) -> float:
     """Estimated water lost per day (evapotranspiration)."""
     f_vpd = vpd_factor(conditions.temp_c, conditions.humidity_pct)
-    f_light = light_factor(plant.light, plant.light_lux or conditions.lux)
+    f_light = lux_to_factor(effective_lux(plant, conditions))
     f_season = season_factor(date, latitude_deg)
     f_growth = growth_factor(plant.growth_state, date, latitude_deg)
     kc = water_use_kc(plant.water_use)
@@ -249,27 +290,31 @@ def daily_loss_ml(plant: Plant, conditions: Conditions, date: dt.date,
     return max(loss, 0.1)  # never divide by ~zero
 
 
-def pour_amount_ml(plant: Plant, species: SpeciesData | None) -> float:
-    amount = deplete_ml(plant, species)
-    # Keep it a measured pour, not a flood.
-    amount = min(amount, _POUR_CAP_FRACTION * plant.soil_volume_ml)
+def pour_amount_ml(plant: Plant, species: SpeciesData | None = None) -> float:
+    """A measured pour: a per-water-use fraction of soil volume (reduced for
+    pots without drainage). Amount is driven by pot size + water preference."""
+    amount = water_use_pour_fraction(plant.water_use) * plant.soil_volume_ml
     if not plant.has_drainage:
         amount *= _NO_DRAINAGE_FACTOR
     return amount
 
 
-def _comfort_warnings(species: SpeciesData | None, conditions: Conditions) -> list[str]:
+def _comfort_warnings(plant: Plant, species: SpeciesData | None,
+                      conditions: Conditions) -> list[str]:
     warnings: list[str] = []
-    if species is None:
-        return warnings
-    t = conditions.temp_c
-    if species.min_temp is not None and t < species.min_temp:
-        warnings.append(f"cold: {t:.0f}C below species min {species.min_temp:.0f}C")
-    if species.max_temp is not None and t > species.max_temp:
-        warnings.append(f"hot: {t:.0f}C above species max {species.max_temp:.0f}C")
-    h = conditions.humidity_pct
-    if species.min_env_humid is not None and h < species.min_env_humid:
-        warnings.append(f"dry air: {h:.0f}% below species min {species.min_env_humid:.0f}%")
+    band = sun_band(plant.sun)
+    if band and plant.light_lux is not None:
+        lo, _, hi = band
+        if plant.light_lux < lo:
+            warnings.append(f"dim: {plant.light_lux:.0f} lux below ideal {lo:.0f}")
+        elif plant.light_lux > hi:
+            warnings.append(f"bright: {plant.light_lux:.0f} lux above ideal {hi:.0f}")
+    if species is not None:
+        t = conditions.temp_c
+        if species.min_temp is not None and t < species.min_temp:
+            warnings.append(f"cold: {t:.0f}C below species min {species.min_temp:.0f}C")
+        if species.max_temp is not None and t > species.max_temp:
+            warnings.append(f"hot: {t:.0f}C above species max {species.max_temp:.0f}C")
     return warnings
 
 
@@ -308,7 +353,7 @@ def watering_recommendation(
         next_date = today
 
     f_vpd = vpd_factor(conditions.temp_c, conditions.humidity_pct)
-    f_light = light_factor(plant.light, plant.light_lux or conditions.lux)
+    f_light = lux_to_factor(effective_lux(plant, conditions))
     f_growth = growth_factor(plant.growth_state, today, latitude_deg)
     explanation = (
         f"{_describe(f_vpd, f_light, f_growth)} -> every {interval} days "
@@ -321,5 +366,5 @@ def watering_recommendation(
         amount_ml=amount,
         daily_loss_ml=loss,
         explanation=explanation,
-        warnings=_comfort_warnings(species, conditions),
+        warnings=_comfort_warnings(plant, species, conditions),
     )
