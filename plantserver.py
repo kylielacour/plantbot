@@ -133,6 +133,7 @@ def index():
 PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Plantbot</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🪴</text></svg>">
 <style>
 :root{color-scheme:light dark}
 body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:1rem;max-width:1100px;margin:auto;line-height:1.4}
