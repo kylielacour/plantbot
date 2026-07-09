@@ -143,7 +143,12 @@ PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 @media (prefers-color-scheme:dark){:root{--card:#1b1d1b;--ink:#e8eae6;--muted:#969b93;--line:#31352e;--accent:#5cc999;--accent-soft:#1d3a2d;--warn:#e0a061;--warn-soft:#33291b;--danger:#e2776d;--danger-soft:#38231f}}
 *{box-sizing:border-box}
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:var(--ink);-webkit-font-smoothing:antialiased}
-.wrap{max-width:1100px;margin:0 auto;padding:22px 16px 100px}
+.wrap{max-width:1100px;margin:0 auto;padding:22px 16px 48px}
+header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.addbtn{flex:none;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--accent);font-size:1.7rem;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.addbtn:hover{border-color:var(--accent);background:var(--accent-soft)}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(16px);background:var(--ink);color:var(--card);padding:9px 16px;border-radius:20px;font-size:.85rem;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:30}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 h1{font-size:1.5rem;font-weight:650;margin:0;letter-spacing:-.02em}
 .climate{color:var(--muted);font-size:.9rem;margin-top:2px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-top:18px}
@@ -167,8 +172,6 @@ h1{font-size:1.5rem;font-weight:650;margin:0;letter-spacing:-.02em}
 .nolight{font-size:.76rem;color:var(--muted)}
 .edit{align-self:flex-start;margin-top:2px;font:inherit;font-size:.82rem;padding:6px 14px;border:1px solid var(--line);border-radius:9px;background:transparent;color:var(--ink);cursor:pointer}
 .edit:hover{border-color:var(--accent);color:var(--accent)}
-.savebar{position:sticky;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:12px 16px;display:flex;gap:10px;align-items:center}
-.savebar .inner{max-width:1100px;margin:0 auto;width:100%;display:flex;gap:10px;align-items:center}
 button.btn{font:inherit;padding:9px 16px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--ink);cursor:pointer}
 button.primary{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600}
 #status{color:var(--muted);font-size:.85rem}
@@ -191,31 +194,25 @@ button.primary{background:var(--accent);color:#fff;border-color:var(--accent);fo
 .mbtns{display:flex;gap:10px;margin-top:14px}
 </style></head><body>
 <div class=wrap>
-  <header><h1>🪴 Plantbot</h1><div class=climate id=climate>loading…</div></header>
+  <header>
+    <div><h1>🪴 Plantbot</h1><div class=climate id=climate>loading…</div></div>
+    <button class=addbtn id=add title="Add a plant" aria-label="Add a plant">+</button>
+  </header>
   <div class=grid id=grid></div>
 </div>
-<div class=savebar><div class=inner>
-  <button class="btn primary" id=save>Save changes</button>
-  <button class="btn" id=add>Add plant</button>
-  <span id=status>Adjust a plant, then Save</span>
-</div></div>
+<div id=toast class=toast></div>
 
 <div id=modal class=overlay style="display:none"><div class=panel>
   <div class=phead><b id=m-title></b><button class=x id=m-close>&times;</button></div>
   <div class=mgrid>
     <label>Name</label><input type=text id=m-name>
-    <label>Species (Open Plantbook pid)</label><input type=text id=m-pid placeholder="(none)">
     <label>Soil volume — <span id=m-volout></span></label><input type=range id=m-vol min=100 max=25000 step=50>
     <label>Soil type</label><select id=m-soil></select>
     <label>Measured light — <span id=m-luxout></span> lux (<span id=m-luxword></span>)</label><input type=range id=m-lux min=0 max=1000 step=1>
-    <label>Sun requirement (garden.org)</label><select id=m-sun></select>
-    <label>Water preference (garden.org)</label><select id=m-wu></select>
+    <label>Sun requirement</label><select id=m-sun></select>
+    <label>Water preference</label><select id=m-wu></select>
     <label>Growth</label><select id=m-grow></select>
     <label><input type=checkbox id=m-drain style="width:auto"> has a drainage hole</label>
-    <div class=hint>Temp / humidity / month below are a what-if preview — the saved schedule always uses live climate.</div>
-    <label>Temp — <span id=m-tempout></span> °F</label><input type=range id=m-temp min=50 max=95 step=1>
-    <label>Humidity — <span id=m-humout></span>%</label><input type=range id=m-hum min=10 max=90 step=1>
-    <label>Month — <span id=m-monthout></span></label><input type=range id=m-month min=1 max=12 step=1>
   </div>
   <div class=mout>
     <div class=metric><small>Water every</small><b><span id=m-interval></span> days</b></div>
@@ -280,28 +277,26 @@ function card(p){
 function render(){$('grid').innerHTML=plants.map(card).join('');}
 function selOpts(list){return list.map(function(o){var k=Array.isArray(o)?o[0]:o,t=Array.isArray(o)?o[1]:o;return '<option value="'+esc(k)+'">'+esc(t)+'</option>';}).join('');}
 
-function setStatus(t){$('status').textContent=t;}
 function loadSchedule(){return fetch('api/schedule').then(function(r){return r.json();}).then(function(list){sched={};list.forEach(function(s){sched[s.id]=s;});render();});}
 function loadClimate(){fetch('api/climate').then(function(r){return r.json();}).then(function(c){
   var tf=Math.round(c.temp_c*9/5+32);climF=tf;climHum=Math.round(c.humidity_pct);
   $('climate').textContent='Climate: '+c.source+' — '+tf+'°F / '+c.humidity_pct+'% RH';});}
 function loadAll(){fetch('api/plants').then(function(r){return r.json();}).then(function(d){plants=d.plants||[];render();loadSchedule();loadClimate();});}
 
-$('save').onclick=function(){setStatus('saving…');
-  fetch('api/plants',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plants:plants})})
-  .then(function(r){return r.json();}).then(function(res){if(res.error){setStatus('error: '+res.error);return;}setStatus('saved '+res.count+' plants');loadSchedule();});};
-$('add').onclick=function(){var id=prompt('Short id for the new plant (e.g. new-fern):');if(!id)return;
-  plants.push({id:id,name:id,pid:null,soil_volume_ml:1000,soil_type:'standard',light_lux:4000,sun:'part_shade',water_use:'mesic',growth_state:'auto',has_drainage:true});render();setStatus('added — Adjust it, then Save');};
+$('add').onclick=function(){var name=prompt('Name of the new plant:');if(!name)return;
+  var id=name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||('plant-'+Date.now());
+  if(plants.some(function(x){return x.id===id;}))id=id+'-'+Date.now();
+  plants.push({id:id,name:name,soil_volume_ml:1000,soil_type:'standard',sun:'part_shade',water_use:'mesic',growth_state:'auto',has_drainage:true});
+  render();persist('Added '+name);openTune(id);};
 
 $('m-soil').innerHTML=selOpts(SOIL);$('m-grow').innerHTML=selOpts(GROW);$('m-wu').innerHTML=selOpts(WU);$('m-sun').innerHTML=selOpts(SUN);
 
 function fbar(nm,m){var w=clamp(m/2*100,0,100);return '<div class=fbar><span class=nm>'+nm+'</span><span class=tr><span class=fl style="width:'+w.toFixed(0)+'%"></span></span><span class=vl>'+m.toFixed(2)+'×</span></div>';}
 function computeTune(){
   var vol=+$('m-vol').value,soil=$('m-soil').value,lux=luxFromSlider(+$('m-lux').value),wu=$('m-wu').value,grow=$('m-grow').value,drain=$('m-drain').checked;
-  var tF=+$('m-temp').value,hum=+$('m-hum').value,mo=+$('m-month').value,tC=(tF-32)*5/9,doy=Math.round((mo-0.5)*30.42);
+  var tC=(climF-32)*5/9,hum=climHum,doy=Math.round((curMonth-0.5)*30.42);
   $('m-volout').textContent=vol>=1000?(vol/1000).toFixed(1)+' L':vol+' ml';
   $('m-luxout').textContent=lux;$('m-luxword').textContent=luxWord(lux);
-  $('m-tempout').textContent=tF;$('m-humout').textContent=hum;$('m-monthout').textContent=MON[mo-1];
   var fv=clamp(svp(tC)*(1-hum/100)/VREF,0.4,2.5),fl=luxF(lux),L=dayLen(doy),
       fs=clamp(0.5+0.5*(L/12),0.5,1.4),fg=grow==='active'?1:grow==='dormant'?0.4:clamp(0.4+0.6*(L-9)/5,0.4,1),kc=KC[wu]||1;
   var dep=vol*(AWC[soil]||.35)*(MAD[wu]||.5),amt=(POUR[wu]||.08)*vol*(drain?1:ND),
@@ -310,21 +305,23 @@ function computeTune(){
   $('m-factors').innerHTML=fbar('dryness',fv)+fbar('light',fl)+fbar('season',fs)+fbar('growth',fg)+fbar('water-use',kc);
 }
 function openTune(id){var p=plants.filter(function(x){return x.id===id;})[0];if(!p)return;mId=id;
-  $('m-title').textContent=p.name||id;$('m-name').value=p.name||'';$('m-pid').value=p.pid||'';
+  $('m-title').textContent=p.name||id;$('m-name').value=p.name||'';
   $('m-vol').value=p.soil_volume_ml||1000;$('m-soil').value=p.soil_type||'standard';
   $('m-lux').value=sliderFromLux(p.light_lux||4000);$('m-sun').value=p.sun||'';$('m-wu').value=normWU(p.water_use);
   $('m-grow').value=p.growth_state||'auto';$('m-drain').checked=p.has_drainage!==false;
-  $('m-temp').value=climF;$('m-hum').value=climHum;$('m-month').value=curMonth;
   computeTune();$('modal').style.display='flex';}
 function closeTune(){$('modal').style.display='none';}
+function toast(msg){var t=$('toast');t.textContent=msg;t.classList.add('show');clearTimeout(window.__tt);window.__tt=setTimeout(function(){t.classList.remove('show');},1800);}
+function persist(msg){fetch('api/plants',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plants:plants})})
+  .then(function(r){return r.json();}).then(function(res){toast(res.error?('error: '+res.error):(msg||'Saved'));loadSchedule();});}
 function applyTune(){var p=plants.filter(function(x){return x.id===mId;})[0];if(p){
-    p.name=$('m-name').value.trim()||p.id;p.pid=$('m-pid').value.trim()||null;
+    p.name=$('m-name').value.trim()||p.id;
     p.soil_volume_ml=+$('m-vol').value;p.soil_type=$('m-soil').value;p.light_lux=luxFromSlider(+$('m-lux').value);
     p.sun=$('m-sun').value||null;p.water_use=$('m-wu').value;p.growth_state=$('m-grow').value;p.has_drainage=$('m-drain').checked;
-    render();setStatus('updated '+p.name+' — Save to persist');}closeTune();}
+    render();persist('Saved '+p.name);}closeTune();}
 
 $('grid').addEventListener('click',function(e){var b=e.target.closest('.edit');if(b)openTune(b.getAttribute('data-id'));});
-['m-vol','m-soil','m-lux','m-wu','m-grow','m-drain','m-temp','m-hum','m-month'].forEach(function(id){$(id).addEventListener('input',computeTune);});
+['m-vol','m-soil','m-lux','m-wu','m-grow','m-drain'].forEach(function(id){$(id).addEventListener('input',computeTune);});
 $('m-apply').onclick=applyTune;$('m-cancel').onclick=closeTune;$('m-close').onclick=closeTune;
 $('modal').addEventListener('click',function(e){if(e.target===$('modal'))closeTune();});
 loadAll();
