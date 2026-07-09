@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
+"""Sync completed Things watering tasks back into local state.
+
+Watches the Things Logbook for completed tasks carrying a ``plant_id:`` note and
+records the completion date as that plant's ``last_watered`` in
+state/watering_state.json (previously this PATCHed Notion).
+"""
+from __future__ import annotations
+
 import json
-import os
 import re
 import subprocess
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
 from dateutil import parser as dateparser
 
-# --- Config (env) ---
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-PROP_LAST_WATERED = os.environ.get("PROP_LAST_WATERED", "Last Watered")
+import plantstore
 
 # --- State ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,10 +23,7 @@ STATE_DIR = BASE_DIR / "state"
 STATE_DIR.mkdir(exist_ok=True)
 STATE_FILE = STATE_DIR / "sync_state.json"
 
-NOTION_VERSION = "2022-06-28"
-NOTION_API_BASE = "https://api.notion.com/v1"
-
-NOTION_ID_RE = re.compile(r"notion_id:\s*([0-9a-fA-F-]{32,36})")
+PLANT_ID_RE = re.compile(r"plant_id:\s*([\w-]+)")
 
 
 def load_state() -> dict:
@@ -39,19 +39,11 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
-def normalize_notion_id(notion_id: str) -> str:
-    # Notion accepts both dashed and undashed, but store dashed consistently
-    nid = notion_id.strip()
-    if len(nid) == 32 and "-" not in nid:
-        return f"{nid[0:8]}-{nid[8:12]}-{nid[12:16]}-{nid[16:20]}-{nid[20:32]}"
-    return nid
+def fetch_recent_logbook_items(limit: int = 400) -> list[dict]:
+    """Pull recent completed todos from the Things Logbook.
 
-
-def fetch_recent_logbook_items(limit: int = 800) -> list[dict]:
-    """
-    Pull recent completed todos from Things Logbook.
-    Robust: escapes multiline notes so each record is a single line.
-    Returns list of dicts: {tid, notes, completion_str}
+    Escapes multiline notes so each record stays on a single output line.
+    Returns list of dicts: {tid, name, notes, completion_str}.
     """
     applescript = f'''
 on replaceText(find, repl, theText)
@@ -74,12 +66,11 @@ tell application "Things3"
     set t to item i of lb
     try
       set tNotes to (notes of t)
-      if tNotes contains "notion_id:" then
+      if tNotes contains "plant_id:" then
         set tId to (id of t) as text
         set tName to (name of t) as text
         set tComp to (completion date of t) as text
 
-        -- Escape line breaks in notes so output stays one record per line
         set tNotes to my replaceText((ASCII character 10), "\\\\n", tNotes)
         set tNotes to my replaceText((ASCII character 13), "", tNotes)
         set tName to my replaceText((ASCII character 10), " ", tName)
@@ -107,61 +98,34 @@ end tell
             continue
         try:
             parts = line.split("|||")
-            tid = parts[0]
-            notes = parts[1].replace("\\n", "\n")
-            comp = parts[2]
-            name = parts[3] if len(parts) > 3 else "(name unavailable)"
             items.append({
-                "tid": tid.strip(),
-                "name": name.strip(),
-                "notes": notes,
-                "completion_str": comp.strip(),
+                "tid": parts[0].strip(),
+                "notes": parts[1].replace("\\n", "\n"),
+                "completion_str": parts[2].strip(),
+                "name": parts[3].strip() if len(parts) > 3 else "(name unavailable)",
             })
         except Exception:
             continue
 
     return items
 
-def extract_notion_id(notes: str) -> str | None:
-    m = NOTION_ID_RE.search(notes or "")
-    if not m:
-        return None
-    return normalize_notion_id(m.group(1))
+
+def extract_plant_id(notes: str) -> str | None:
+    m = PLANT_ID_RE.search(notes or "")
+    return m.group(1) if m else None
 
 
 def parse_completion_date(completion_str: str) -> datetime:
-    """
-    completion_str is locale-ish (e.g. 'Sunday, January 4, 2026 at 10:51:10 AM').
-    dateutil can parse this reliably on macOS.
-    """
-    dt = dateparser.parse(completion_str)
-    if dt.tzinfo is None:
-        # Treat as local time, convert to UTC ISO for storage/comparison if needed
-        # For Notion date property, we can just use YYYY-MM-DD in local date.
-        return dt
-    return dt.astimezone(timezone.utc)
-
-
-def notion_update_last_watered(page_id: str, local_date_yyyy_mm_dd: str) -> None:
-    url = f"{NOTION_API_BASE}/pages/{page_id}"
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": NOTION_VERSION,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "properties": {
-            PROP_LAST_WATERED: {"date": {"start": local_date_yyyy_mm_dd}}
-        }
-    }
-    r = requests.patch(url, headers=headers, json=payload, timeout=30)
-    r.raise_for_status()
+    """completion_str is locale-ish, e.g. 'Sunday, January 4, 2026 at 10:51 AM'."""
+    return dateparser.parse(completion_str)
 
 
 def main():
     state = load_state()
     processed_ids: list[str] = state.get("processed_things_ids", [])
     processed_set = set(processed_ids)
+
+    _, watering_state = plantstore.make_stores()
 
     items = fetch_recent_logbook_items(limit=400)
 
@@ -170,48 +134,34 @@ def main():
         tid = it["tid"]
         if tid in processed_set:
             continue
-        nid = extract_notion_id(it["notes"])
-        if not nid:
+        pid = extract_plant_id(it["notes"])
+        if not pid:
             continue
-
-        # Use completion date as the watering date
         try:
             comp_dt = parse_completion_date(it["completion_str"])
         except Exception:
             comp_dt = datetime.now()
+        to_process.append((tid, pid, comp_dt.date(), it["name"]))
 
-        local_date = comp_dt.date().isoformat()
-        to_process.append((tid, nid, local_date, it["name"]))
-
-    print(f"Found {len(to_process)} new Logbook items with notion_id in last 400 entries.")
+    print(f"Found {len(to_process)} new Logbook waterings with plant_id.")
 
     updated = 0
-    for tid, notion_page_id, local_date, name in to_process:
-        success = False
-        for attempt in range(1, 4):
-            try:
-                notion_update_last_watered(notion_page_id, local_date)
-                success = True
-                updated += 1
-                print(f"Updated Notion Last Watered = {local_date} for: {name}")
-                break
-            except Exception as e:
-                print(f"Attempt {attempt}/3 FAILED for {name} ({notion_page_id}): {e}")
-                if attempt < 3:
-                    time.sleep(2 ** attempt)
-
-        if success:
+    for tid, plant_id, local_date, name in to_process:
+        try:
+            watering_state.set_last_watered(plant_id, local_date)
             processed_ids.append(tid)
-        else:
-            print(f"GIVING UP on {name} ({notion_page_id}) — will retry next run")
+            updated += 1
+            print(f"last_watered[{plant_id}] = {local_date.isoformat()}  ({name})")
+        except Exception as e:
+            print(f"FAILED to record {plant_id} ({name}): {e} — will retry next run")
 
-    # Cap processed list so it doesn't grow forever
+    # Cap processed list so it doesn't grow forever.
     processed_ids = processed_ids[-2000:]
     state["processed_things_ids"] = processed_ids
     state["last_run_iso"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
 
-    print(f"Processed {updated} updates. State saved to {STATE_FILE}")
+    print(f"Recorded {updated} waterings. State saved to {STATE_FILE}")
 
 
 def notify_error(message: str) -> None:
@@ -219,6 +169,7 @@ def notify_error(message: str) -> None:
         "osascript", "-e",
         f'display notification "{message}" with title "plantbot" sound name "Basso"',
     ])
+
 
 if __name__ == "__main__":
     try:

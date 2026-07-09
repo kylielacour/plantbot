@@ -1,0 +1,61 @@
+# Plantbot plant definitions.
+#
+# Copy this to plants.yaml (which is git-ignored) and edit for your plants.
+# last_watered is NOT stored here -- the sync script tracks it in
+# state/watering_state.json so your comments/formatting are never clobbered.
+#
+# Per-plant fields:
+#   id            (required) stable slug; embedded in the Things task as
+#                 "plant_id:" and used to key watering state. Never reuse/rename.
+#   name          (required) display name shown in the Things task.
+#   pid           Open Plantbook species id (from `enrich_plants.py` or the OPB
+#                 site). Supplies the soil-moisture band + comfort ranges.
+#   soil_volume_ml  internal soil volume. Either give this directly, OR give
+#                 inner_diameter_cm + soil_depth_cm and it is computed.
+#   soil_type     standard | peat | coco | aroid | cactus | moisture
+#                 (only used as a fallback when pid/OPB has no moisture band)
+#   light         low | medium | bright | direct   (the plant's SPOT, measured
+#                 once with a phone lux app -- no light sensor needed)
+#   light_lux     optional measured lux; overrides the `light` category
+#   water_use     low | medium | high  (transpiration intensity: succulents=low,
+#                 most foliage=medium, ferns/calathea=high)
+#   growth_state  active | dormant | auto   (auto = derive dormancy from season)
+#   has_drainage  true | false  (false = pot has no drainage hole; pours are
+#                 reduced to avoid pooling)
+#   overrides:    optionally override any Open Plantbook threshold, e.g.
+#                 min_soil_moist / max_soil_moist / min_temp / max_temp / ...
+
+plants:
+  - id: monstera-living-room
+    name: Monstera (living room)
+    pid: monstera deliciosa
+    inner_diameter_cm: 24
+    soil_depth_cm: 22
+    soil_type: aroid
+    light: bright
+    water_use: medium
+    growth_state: auto
+    has_drainage: true
+
+  - id: snake-plant-bedroom
+    name: Snake plant (bedroom)
+    pid: sansevieria trifasciata
+    soil_volume_ml: 3000
+    soil_type: cactus
+    light: low
+    water_use: low
+    growth_state: auto
+    has_drainage: true
+
+  - id: fern-bathroom
+    name: Boston fern (bathroom)
+    pid: nephrolepis exaltata
+    inner_diameter_cm: 18
+    soil_depth_cm: 16
+    soil_type: moisture
+    light: medium
+    water_use: high
+    growth_state: active
+    has_drainage: false
+    overrides:
+      min_soil_moist: 35   # keep this one wetter than OPB suggests

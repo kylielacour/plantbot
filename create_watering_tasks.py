@@ -1,118 +1,48 @@
 #!/usr/bin/env python3
+"""Create watering tasks in Things from local plant config.
+
+Flow:
+  1. Load plants from plants.yaml.
+  2. Get current climate (Home Assistant thermostat if available, else static).
+  3. For each plant, pull species setpoints from the Open Plantbook cache and
+     compute interval + amount with watering_model.
+  4. If the plant is due (next_date <= today) and not already scheduled/recently
+     watered, create a Things task.
+
+Use --dry-run to print the full computed schedule without touching Things.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
 import os
 import re
 import subprocess
-import datetime as dt
-from typing import Any
 
-import requests
+import climate
+import plantstore
+import watering_model
+from openplantbook import OpenPlantbook
+from plantstore import make_stores
+from units import ml_to_cups_str
 
-# ===== Config (from .env) =====
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
-NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 THINGS_PROJECT = os.environ.get("THINGS_PROJECT_NAME", "Plant Care")
+LATITUDE = float(os.environ.get("LATITUDE", "40"))
 
-PROP_NAME = os.environ.get("PROP_NAME", "Name")
-PROP_NEXT_WATERING = os.environ.get("PROP_NEXT_WATERING", "Next Watering")
-PROP_RECOMMENDED_WATER = os.environ.get("PROP_RECOMMENDED_WATER", "Recommended Water (ml)")
-
-NOTION_VERSION = "2022-06-28"
-
-# ===== Cups (fractions) =====
-ML_PER_CUP = 236.588
-FRACTIONS = [
-    (0.0, ""),
-    (0.25, "¼"),
-    (1 / 3, "⅓"),
-    (0.5, "½"),
-    (2 / 3, "⅔"),
-    (0.75, "¾"),
-    (1.0, ""),
-]
-
-def ml_to_cups_str(ml: float) -> str:
-    cups = ml / ML_PER_CUP
-    whole = int(cups)
-    remainder = cups - whole
-
-    frac_value, frac_str = min(FRACTIONS, key=lambda f: abs(remainder - f[0]))
-
-    if frac_value >= 0.99:
-        whole += 1
-        frac_str = ""
-
-    if whole == 0 and frac_str:
-        return f"{frac_str} cup"
-    if whole > 0 and frac_str:
-        return f"{whole}{frac_str} cups"
-    if whole > 0:
-        return f"{whole} cup" if whole == 1 else f"{whole} cups"
-    return "0 cups"
-
-# ===== Helpers =====
-def notion_headers() -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": NOTION_VERSION,
-        "Content-Type": "application/json",
-    }
 
 def escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
-def get_title(props: dict[str, Any]) -> str:
-    p = props.get(PROP_NAME)
-    if p and p.get("type") == "title":
-        return "".join(x.get("plain_text", "") for x in p.get("title", [])).strip()
 
-    for _, v in props.items():
-        if v.get("type") == "title":
-            return "".join(x.get("plain_text", "") for x in v.get("title", [])).strip()
-
-    return "Untitled Plant"
-
-def get_date(props: dict[str, Any], name: str) -> str | None:
-    p = props.get(name)
-    if not p:
-        return None
-    if p.get("type") == "date" and p.get("date"):
-        return p["date"].get("start")
-    if p.get("type") == "formula":
-        f = p.get("formula", {})
-        if f.get("type") == "date" and f.get("date"):
-            return f["date"].get("start")
-    return None
-
-def get_number(props: dict[str, Any], name: str) -> float | None:
-    p = props.get(name)
-    if not p:
-        return None
-
-    t = p.get("type")
-    if t == "number":
-        return p.get("number")
-
-    if t == "formula":
-        f = p.get("formula", {})
-        if f.get("type") == "number":
-            return f.get("number")
-
-    if t == "rollup":
-        r = p.get("rollup", {})
-        if r.get("type") == "number":
-            return r.get("number")
-
-    return None
-
-# ===== Things (dedupe by notion_id) =====
-def get_open_notion_ids() -> set[str]:
+# ===== Things (dedupe by plant_id) =====
+def get_open_plant_ids() -> set[str]:
     applescript = f'''
 tell application "Things3"
   tell project "{escape(THINGS_PROJECT)}"
     set ids to {{}}
     repeat with t in (to dos whose status is open)
       set n to notes of t
-      if n contains "notion_id:" then
+      if n contains "plant_id:" then
         set end of ids to n
       end if
     end repeat
@@ -121,12 +51,12 @@ tell application "Things3"
 end tell
 '''
     p = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True)
-    return {m.group(1) for m in re.finditer(r"notion_id:\s*([\w-]+)", p.stdout or "")}
+    return {m.group(1) for m in re.finditer(r"plant_id:\s*([\w-]+)", p.stdout or "")}
 
 
-def get_recently_completed_notion_ids(days: int = 2) -> set[str]:
-    """Check Logbook for tasks completed within the last N days to avoid
-    re-creating a task before the sync script updates Notion."""
+def get_recently_completed_plant_ids(days: int = 2) -> set[str]:
+    """Logbook items completed within the last N days, so we don't re-create a
+    task before the sync script records the watering."""
     applescript = f'''
 tell application "Things3"
   set cutoff to (current date) - ({days} * days)
@@ -140,7 +70,7 @@ tell application "Things3"
     try
       if (completion date of t) > cutoff then
         set tn to notes of t
-        if tn contains "notion_id:" then
+        if tn contains "plant_id:" then
           set end of ids to tn
         end if
       end if
@@ -150,7 +80,8 @@ tell application "Things3"
 end tell
 '''
     p = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True)
-    return {m.group(1) for m in re.finditer(r"notion_id:\s*([\w-]+)", p.stdout or "")}
+    return {m.group(1) for m in re.finditer(r"plant_id:\s*([\w-]+)", p.stdout or "")}
+
 
 def create_things_task(title: str, notes: str, days_offset: int = 0) -> None:
     applescript = f'''
@@ -165,72 +96,90 @@ end tell
 '''
     subprocess.run(["osascript", "-e", applescript], check=True)
 
+
 # ===== Main =====
-def main() -> None:
-    print("Running create_watering_tasks...")
-    print("THINGS_PROJECT:", THINGS_PROJECT)
-    print("NOTION_DATABASE_ID:", NOTION_DATABASE_ID)
+def main(dry_run: bool = False) -> None:
+    today = dt.date.today()
 
-    today_iso = dt.date.today().isoformat()
+    entries, state = make_stores()
+    opb = OpenPlantbook.from_env()
 
-    payload = {
-        "filter": {
-            "property": PROP_NEXT_WATERING,
-            "date": {"on_or_before": today_iso},
-        },
-        "page_size": 100,
-    }
+    print(f"Plant source: {os.environ.get('PLANTBOT_SERVER_URL') or 'local plants.yaml'}")
 
-    url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
-    r = requests.post(url, headers=notion_headers(), json=payload, timeout=30)
-    r.raise_for_status()
+    source, source_desc = climate.from_env()
+    conditions = source.conditions(today)
 
-    results = r.json().get("results", [])
+    print(f"Climate: {source_desc} -> {conditions.temp_c:.1f}C / "
+          f"{conditions.humidity_pct:.0f}% RH"
+          + (f" / {conditions.lux:.0f} lux" if conditions.lux else ""))
+    print(f"Plants: {len(entries)}  |  Open Plantbook: "
+          f"{'enabled' if opb else 'not configured (using fallbacks)'}")
 
-    print(f"Notion rows returned: {len(results)}")
+    if dry_run:
+        open_ids: set[str] = set()
+        recent_ids: set[str] = set()
+    else:
+        open_ids = get_open_plant_ids()
+        recent_ids = get_recently_completed_plant_ids(days=2)
 
-    open_notion_ids = get_open_notion_ids()
-    recent_notion_ids = get_recently_completed_notion_ids(days=2)
-    skip_ids = open_notion_ids | recent_notion_ids
+    for entry in entries:
+        plant = entry.plant
 
-    for page in results:
-        page_id = page["id"]
-        props = page.get("properties", {})
+        base_species = None
+        if opb and entry.pid:
+            base_species = opb.cached_species_data(entry.pid)
+            if base_species is None:
+                # Not cached yet -- fetch on demand (also warms the cache).
+                try:
+                    base_species = opb.species_data(entry.pid)
+                except Exception as e:
+                    print(f"  ! OPB fetch failed for {entry.pid}: {e}")
+        species = entry.species_with_overrides(base_species)
 
-        if page_id in skip_ids:
-            reason = "open task" if page_id in open_notion_ids else "recently completed"
-            print(f"SKIP ({reason}):", page_id)
-            continue
-
-        plant_name = get_title(props)
-
-        ml = get_number(props, PROP_RECOMMENDED_WATER)
-        if ml is not None:
-            ml_rounded = int(round(ml))
-            ml_str = f"{ml_rounded} ml"
-            title_amount = ml_to_cups_str(ml_rounded)
-        else:
-            ml_str = "ml?"
-            title_amount = "amount?"
-
-        task_title = f"Water {plant_name} — {title_amount}"
-
-        notes = (
-            f"Amount: {ml_str}\n"
-            f"Notion: https://www.notion.so/{page_id.replace('-', '')}\n"
-            f"notion_id: {page_id}"
+        last_watered = state.get_last_watered(plant.id)
+        rec = watering_model.watering_recommendation(
+            plant=plant,
+            species=species,
+            conditions=conditions,
+            last_watered=last_watered,
+            today=today,
+            latitude_deg=LATITUDE,
         )
 
-        next_water_str = get_date(props, PROP_NEXT_WATERING)
-        if next_water_str:
-            due_date = dt.date.fromisoformat(next_water_str[:10])
-            days_offset = (due_date - dt.date.today()).days
+        amount_str = ml_to_cups_str(rec.amount_ml)
+        ml_rounded = int(round(rec.amount_ml))
+        due_in = (rec.next_date - today).days
+        warn = f"  ⚠ {'; '.join(rec.warnings)}" if rec.warnings else ""
+
+        print(f"\n{plant.name} [{plant.id}]")
+        print(f"  {rec.explanation}")
+        print(f"  amount: {ml_rounded} ml ({amount_str})  "
+              f"last watered: {last_watered or 'never'}  "
+              f"next: {rec.next_date} (in {due_in}d){warn}")
+
+        if due_in > 0:
+            continue  # not due yet
+
+        if plant.id in open_ids:
+            print("  SKIP (open task already exists)")
+            continue
+        if plant.id in recent_ids:
+            print("  SKIP (watered recently, sync pending)")
+            continue
+
+        title = f"Water {plant.name} — {amount_str}"
+        notes = (
+            f"Amount: {ml_rounded} ml\n"
+            f"{rec.explanation}\n"
+            f"plant_id: {plant.id}"
+        )
+
+        if dry_run:
+            print("  DRY-RUN: would create task:", title)
         else:
-            days_offset = 0
+            print("  CREATE:", title)
+            create_things_task(title, notes, days_offset=0)
 
-        print("READY:", task_title)
-
-        create_things_task(task_title, notes, days_offset)
 
 def notify_error(message: str) -> None:
     subprocess.run([
@@ -238,9 +187,15 @@ def notify_error(message: str) -> None:
         f'display notification "{message}" with title "plantbot" sound name "Basso"',
     ])
 
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Create watering tasks in Things.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the computed schedule without creating tasks")
+    args = parser.parse_args()
+
     try:
-        main()
+        main(dry_run=args.dry_run)
     except Exception as e:
         notify_error(f"Error: {e}")
         raise
