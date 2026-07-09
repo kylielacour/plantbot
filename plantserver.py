@@ -309,8 +309,8 @@ function openTune(id){var p=plants.filter(function(x){return x.id===id;})[0];if(
   $('m-vol').value=p.soil_volume_ml||1000;$('m-soil').value=p.soil_type||'standard';
   $('m-lux').value=sliderFromLux(p.light_lux||4000);$('m-sun').value=p.sun||'';$('m-wu').value=normWU(p.water_use);
   $('m-grow').value=p.growth_state||'auto';$('m-drain').checked=p.has_drainage!==false;
-  computeTune();$('modal').style.display='flex';}
-function closeTune(){$('modal').style.display='none';}
+  computeTune();$('modal').style.display='flex';document.body.style.overflow='hidden';}
+function closeTune(){$('modal').style.display='none';document.body.style.overflow='';}
 function toast(msg){var t=$('toast');t.textContent=msg;t.classList.add('show');clearTimeout(window.__tt);window.__tt=setTimeout(function(){t.classList.remove('show');},1800);}
 function persist(msg){fetch('api/plants',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plants:plants})})
   .then(function(r){return r.json();}).then(function(res){toast(res.error?('error: '+res.error):(msg||'Saved'));loadSchedule();});}
