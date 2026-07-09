@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""One-time migration: export the old Notion plant database to plants.yaml.
+
+Maps your Notion input columns to Plantbot's plants.yaml fields and carries
+"Last Watered" into state/watering_state.json. The old Notion *formulas*
+(Recommended Water, Watering Interval, etc.) are intentionally dropped — the new
+watering_model recomputes those.
+
+    ./venv/bin/python migrate_notion_to_yaml.py > plants.yaml
+
+You'll still need to add each plant's Open Plantbook `pid` afterwards:
+    ./venv/bin/python enrich_plants.py    # suggests pids to paste in
+
+Requires NOTION_TOKEN and NOTION_DATABASE_ID in the environment.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import os
+import re
+import sys
+
+import requests
+
+import plantstore
+
+NOTION_TOKEN = os.environ["NOTION_TOKEN"]
+NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
+NOTION_VERSION = "2022-06-28"
+
+ML_PER_CUBIC_INCH = 16.387064
+
+# Notion "Species Group" -> water_use (transpiration intensity).
+WATER_USE_BY_GROUP = {
+    "succulent/cactus": "low",
+    "aroid": "medium",
+    "tropical foliage": "medium",
+    "woody/tree-like": "medium",
+    "thin-leaf tropical": "high",
+    "herb/fast grower": "high",
+    "cutting/propagation": "high",
+}
+# Fallback soil_type by species group (used if Soil Type is unset).
+SOIL_BY_GROUP = {
+    "succulent/cactus": "cactus",
+    "aroid": "aroid",
+}
+
+
+def headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
+# --- property extractors ---
+def _title(props, name="Name"):
+    p = props.get(name, {})
+    if p.get("type") == "title":
+        return "".join(x.get("plain_text", "") for x in p["title"]).strip()
+    for v in props.values():
+        if v.get("type") == "title":
+            return "".join(x.get("plain_text", "") for x in v["title"]).strip()
+    return "Untitled Plant"
+
+
+def _number(props, name):
+    p = props.get(name, {})
+    t = p.get("type")
+    if t == "number":
+        return p.get("number")
+    if t == "formula" and p["formula"].get("type") == "number":
+        return p["formula"].get("number")
+    return None
+
+
+def _checkbox(props, name):
+    p = props.get(name, {})
+    return bool(p.get("checkbox")) if p.get("type") == "checkbox" else None
+
+
+def _select(props, name):
+    p = props.get(name, {})
+    if p.get("type") == "select":
+        return (p.get("select") or {}).get("name")
+    return None
+
+
+def _multi(props, name):
+    p = props.get(name, {})
+    if p.get("type") == "multi_select":
+        return [o["name"] for o in p.get("multi_select", [])]
+    return []
+
+
+def _date(props, name):
+    p = props.get(name, {})
+    if p.get("type") == "date" and p.get("date"):
+        return p["date"].get("start")
+    return None
+
+
+# --- mappers ---
+def map_soil_type(soil_multi: list[str], group: str | None) -> str:
+    joined = " ".join(soil_multi).lower()
+    if any(k in joined for k in ("cactus", "succulent", "grit", "sand", "pumice")):
+        return "cactus"
+    if "coco" in joined or "coir" in joined:
+        return "coco"
+    if "peat" in joined:
+        return "peat"
+    if any(k in joined for k in ("bark", "chunky", "aroid", "orchid", "perlite")):
+        return "aroid"
+    if any(k in joined for k in ("moisture", "retentive", "sphagnum")):
+        return "moisture"
+    return SOIL_BY_GROUP.get((group or "").lower(), "standard")
+
+
+def map_water_use(group: str | None) -> str:
+    return WATER_USE_BY_GROUP.get((group or "").lower(), "medium")
+
+
+def map_light(light_num) -> str:
+    if light_num is None:
+        return "medium"
+    if light_num <= 2:
+        return "low"
+    if light_num == 3:
+        return "medium"
+    if light_num == 4:
+        return "bright"
+    return "direct"
+
+
+def soil_volume_ml(props) -> float | None:
+    vol_in3 = _number(props, "Pot Volume")
+    if vol_in3:
+        return round(vol_in3 * ML_PER_CUBIC_INCH)
+    d = _number(props, "Pot Diameter (in)")
+    depth = _number(props, "Pot Depth (in)")
+    if d and depth:
+        r = d / 2.0
+        in3 = 3.141592653589793 * r * r * depth
+        return round(in3 * ML_PER_CUBIC_INCH)
+    return None
+
+
+def slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "plant"
+
+
+def fetch_all() -> list[dict]:
+    url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
+    results, cursor = [], None
+    while True:
+        body = {"page_size": 100}
+        if cursor:
+            body["start_cursor"] = cursor
+        r = requests.post(url, headers=headers(), json=body, timeout=30)
+        r.raise_for_status()
+        j = r.json()
+        results.extend(j["results"])
+        if not j.get("has_more"):
+            return results
+        cursor = j["next_cursor"]
+
+
+def main() -> None:
+    pages = fetch_all()
+    state = plantstore.WateringState()
+    seen: dict[str, int] = {}
+    carried = 0
+
+    print("# Generated by migrate_notion_to_yaml.py")
+    print("# Review each plant, then add `pid:` via enrich_plants.py.")
+    print("plants:")
+
+    for page in pages:
+        props = page.get("properties", {})
+        name = _title(props)
+        slug = slugify(name)
+        if slug in seen:
+            seen[slug] += 1
+            slug = f"{slug}-{seen[slug]}"
+        else:
+            seen[slug] = 1
+
+        group = _select(props, "Species Group")
+        vol = soil_volume_ml(props)
+        has_drainage = _checkbox(props, "Has Drainage")
+        material = _select(props, "Pot Material")
+        if material == "Glass Jar":
+            has_drainage = False
+        location = _select(props, "Location")
+
+        print(f"  - id: {slug}")
+        print(f"    name: {name}" + (f"    # {location}" if location else ""))
+        print(f"    pid:            # TODO: run enrich_plants.py")
+        if vol:
+            print(f"    soil_volume_ml: {vol}")
+        else:
+            print(f"    soil_volume_ml: # TODO: could not derive from Notion")
+        print(f"    soil_type: {map_soil_type(_multi(props, 'Soil Type'), group)}"
+              + (f"    # Notion group: {group}" if group else ""))
+        print(f"    light: {map_light(_number(props, 'Light'))}")
+        print(f"    water_use: {map_water_use(group)}")
+        print(f"    growth_state: auto")
+        print(f"    has_drainage: {str(bool(has_drainage)).lower()}")
+
+        lw = _date(props, "Last Watered")
+        if lw:
+            try:
+                state.set_last_watered(slug, dt.date.fromisoformat(lw[:10]))
+                carried += 1
+            except ValueError:
+                pass
+
+    print(f"\n# Migrated {len(pages)} plants; carried {carried} 'Last Watered' "
+          f"dates into state/watering_state.json", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

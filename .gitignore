@@ -12,3 +12,6 @@ venv/
 *.log
 *.err
 state/
+
+# Local plant config (keep plants.example.yaml tracked)
+plants.yaml
