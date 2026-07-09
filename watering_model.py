@@ -80,15 +80,16 @@ POUR_FRACTION_BY_WATER_USE = {
 }
 _DEFAULT_POUR_FRACTION = 0.08
 
-# garden.org "Sun Requirements" -> (min, ideal, max) lux at the plant. Replaces
-# Open Plantbook's light band. Measured lux still drives the watering math; this
-# gives the default when unmeasured and the "too dark / too bright" warning.
+# garden.org "Sun Requirements" -> (min, ideal, max) lux at the plant, on a
+# realistic INDOOR scale (what a home window actually delivers — not outdoor
+# optimums). Measured lux still drives the watering math; this gives the default
+# when unmeasured and the "too dark / too bright" warning.
 SUN_TO_LUX = {
-    "full_sun": (15000, 40000, 100000),
-    "sun_to_part_shade": (8000, 20000, 50000),
-    "part_shade": (4000, 10000, 25000),
-    "part_to_full_shade": (1000, 5000, 12000),
-    "full_shade": (400, 1500, 6000),
+    "full_sun": (1200, 5000, 20000),
+    "sun_to_part_shade": (700, 3000, 12000),
+    "part_shade": (350, 1500, 7000),
+    "part_to_full_shade": (150, 800, 4000),
+    "full_shade": (60, 400, 2000),
 }
 
 # Legacy light categories -> representative lux (fallback when no lux/sun given).

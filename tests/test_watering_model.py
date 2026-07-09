@@ -104,7 +104,7 @@ def test_legacy_water_use_aliases():
 
 def test_sun_band_flags_too_dim():
     cond = wm.Conditions(temp_c=22, humidity_pct=50)
-    plant = make_plant(sun="part_shade", light_lux=800)  # band min 4000
+    plant = make_plant(sun="part_shade", light_lux=100)  # band min 350
     rec = wm.watering_recommendation(plant, None, cond, SUMMER, SUMMER, LAT)
     assert any("dim" in w for w in rec.warnings)
 
