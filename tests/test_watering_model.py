@@ -70,19 +70,43 @@ def test_drought_tolerant_depletes_more_than_moisture_lover():
     assert wm.deplete_ml(succulent) > wm.deplete_ml(thirsty)
 
 
-def test_pour_is_capped_to_measured_amount():
-    # A huge tolerant band must not produce a flood; cap at 20% of volume.
-    plant = make_plant(soil_type="moisture", soil_volume_ml=5000.0)
-    tolerant = wm.SpeciesData(min_soil_moist=5, max_soil_moist=95)
-    assert wm.pour_amount_ml(plant, tolerant) <= wm._POUR_CAP_FRACTION * 5000.0 + 1e-6
+def test_pour_is_fraction_of_volume_by_water_use():
+    # mesic -> 8% of soil volume.
+    plant = make_plant(soil_volume_ml=5000.0, water_use="mesic")
+    assert wm.pour_amount_ml(plant) == pytest.approx(0.08 * 5000.0)
+
+
+def test_wetter_preference_pours_more():
+    dry = make_plant(water_use="dry")
+    wet = make_plant(water_use="wet")
+    assert wm.pour_amount_ml(wet) > wm.pour_amount_ml(dry)
 
 
 def test_no_drainage_reduces_pour():
-    species = monstera_species()
-    drained = wm.pour_amount_ml(make_plant(has_drainage=True), species)
-    undrained = wm.pour_amount_ml(make_plant(has_drainage=False), species)
+    drained = wm.pour_amount_ml(make_plant(has_drainage=True))
+    undrained = wm.pour_amount_ml(make_plant(has_drainage=False))
     assert undrained < drained
     assert undrained == pytest.approx(drained * wm._NO_DRAINAGE_FACTOR)
+
+
+def test_five_level_water_use_interval_monotonic():
+    cond = wm.Conditions(temp_c=22, humidity_pct=50)
+    ivs = [_interval(make_plant(water_use=w), cond)
+           for w in ["dry", "dry_mesic", "mesic", "wet_mesic", "wet"]]
+    assert ivs == sorted(ivs, reverse=True)  # drier prefs -> longer intervals
+
+
+def test_legacy_water_use_aliases():
+    assert wm.water_use_kc("low") == wm.water_use_kc("dry")
+    assert wm.water_use_kc("medium") == wm.water_use_kc("mesic")
+    assert wm.water_use_kc("high") == wm.water_use_kc("wet")
+
+
+def test_sun_band_flags_too_dim():
+    cond = wm.Conditions(temp_c=22, humidity_pct=50)
+    plant = make_plant(sun="part_shade", light_lux=800)  # band min 4000
+    rec = wm.watering_recommendation(plant, None, cond, SUMMER, SUMMER, LAT)
+    assert any("dim" in w for w in rec.warnings)
 
 
 # --------------------------------------------------------- interval behaviour

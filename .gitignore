@@ -15,3 +15,6 @@ state/
 
 # Local plant config (keep plants.example.yaml tracked)
 plants.yaml
+
+# Claude worktree pool (embedded checkouts)
+.claude/worktrees/
