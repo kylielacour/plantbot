@@ -183,6 +183,15 @@ def test_representative_plant_dries_in_about_nine_days():
     assert 7 <= interval <= 11
 
 
+def test_never_watered_plant_is_due_today():
+    plant = make_plant()
+    cond = wm.Conditions(temp_c=22, humidity_pct=50)
+    today = dt.date(2026, 7, 25)
+    rec = wm.watering_recommendation(
+        plant, None, cond, last_watered=None, today=today, latitude_deg=LAT)
+    assert rec.next_date == today  # surfaces immediately, doesn't slide forward
+
+
 def test_overdue_plant_is_scheduled_today_not_past():
     plant = make_plant()
     cond = wm.Conditions(temp_c=22, humidity_pct=50)

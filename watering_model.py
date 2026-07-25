@@ -347,11 +347,16 @@ def watering_recommendation(
     raw_interval = to_deplete / loss
     interval = int(round(clamp(raw_interval, MIN_INTERVAL_DAYS, MAX_INTERVAL_DAYS)))
 
-    anchor = last_watered or today
-    next_date = anchor + dt.timedelta(days=interval)
-    # Never schedule in the past (e.g. long-overdue plants) — water today.
-    if next_date < today:
+    if last_watered is None:
+        # A newly-added plant surfaces a task now so it enters the cycle;
+        # checking it off records the real last-watered date. (Otherwise a
+        # never-watered plant anchors to "today" every run and is never due.)
         next_date = today
+    else:
+        next_date = last_watered + dt.timedelta(days=interval)
+        # Long-overdue: water today, don't backfill missed dates.
+        if next_date < today:
+            next_date = today
 
     f_vpd = vpd_factor(conditions.temp_c, conditions.humidity_pct)
     f_light = lux_to_factor(effective_lux(plant, conditions))
