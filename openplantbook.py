@@ -125,10 +125,32 @@ class OpenPlantbook:
         raw = self.detail_raw(pid, refresh=refresh)
         return species_data_from_detail(raw)
 
+    def species_data_or_none(self, pid: str) -> SpeciesData | None:
+        """SpeciesData for a pid, or None when OPB has no such species.
+
+        OPB's coverage has real holes (it has no Rhaphidophora at all, for
+        instance). A 404 is a permanent answer, not a transient failure, so it
+        gets cached as a tombstone -- otherwise every scheduled run re-requests
+        a species that will never exist and buries the log in tracebacks.
+        """
+        raw = self._cache.get(pid)
+        if raw is None:
+            try:
+                raw = self.detail_raw(pid)
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 404:
+                    self._cache[pid] = {"_missing": True, "_cached_at": time.time()}
+                    self._save_cache()
+                    return None
+                raise
+        return None if raw.get("_missing") else species_data_from_detail(raw)
+
     def cached_species_data(self, pid: str) -> SpeciesData | None:
         """SpeciesData from cache only (no network). None if not cached."""
         raw = self._cache.get(pid)
-        return species_data_from_detail(raw) if raw else None
+        if not raw or raw.get("_missing"):
+            return None
+        return species_data_from_detail(raw)
 
 
 def species_data_from_detail(raw: dict[str, Any]) -> SpeciesData:

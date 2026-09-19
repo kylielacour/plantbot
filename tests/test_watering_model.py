@@ -102,6 +102,131 @@ def test_legacy_water_use_aliases():
     assert wm.water_use_kc("high") == wm.water_use_kc("wet")
 
 
+# ------------------------------------------------------- light by placement
+def test_estimate_lux_south_window_is_brightest():
+    at_glass = {"distance": "in_window"}
+    luxes = [wm.estimate_lux(w, **at_glass) for w in ["south", "west", "east", "north"]]
+    assert luxes == sorted(luxes, reverse=True)
+
+
+def test_estimate_lux_falls_off_with_distance():
+    luxes = [wm.estimate_lux("west", d)
+             for d in ["in_window", "near", "mid", "far"]]
+    assert luxes == sorted(luxes, reverse=True)
+
+
+def test_filtered_light_reduces_estimate():
+    assert wm.estimate_lux("south", "near", filtered=True) < wm.estimate_lux("south", "near")
+
+
+def test_no_window_ignores_distance():
+    # Distance from a window is meaningless when there isn't one.
+    assert wm.estimate_lux("none", "in_window") == wm.estimate_lux("none", "far")
+
+
+@pytest.mark.parametrize("window,distance,sun", [
+    ("south", "in_window", "full_sun"),
+    ("west",  "in_window", "sun_to_part_shade"),
+    ("south", "near",      "sun_to_part_shade"),
+    ("west",  "near",      "part_shade"),
+    ("east",  "near",      "part_shade"),
+    ("north", "in_window", "part_shade"),
+    ("west",  "mid",       "part_to_full_shade"),
+    ("north", "near",      "part_to_full_shade"),
+    ("south", "far",       "part_to_full_shade"),
+    ("north", "mid",       "full_shade"),
+    ("east",  "far",       "full_shade"),
+    ("none",  "near",      "full_shade"),
+])
+def test_placement_lands_in_its_intended_sun_band(window, distance, sun):
+    """The placement scale is anchored to SUN_TO_LUX: a spot that can support a
+    given sun category must actually land inside that category's band. This is
+    the calibration -- if someone retunes one table without the other, this
+    fails."""
+    lux = wm.estimate_lux(window, distance)
+    lo, _, hi = wm.SUN_TO_LUX[sun]
+    assert lo <= lux <= hi, f"{window}/{distance} = {lux:.0f} outside {sun} {lo}-{hi}"
+
+
+def test_seasonal_intensity_averages_one_over_the_year():
+    # The placement table is calibrated as a year-round average, so the seasonal
+    # factor must swing around it, not shift it.
+    year = dt.date(2026, 1, 1)
+    vals = [solar.solar_intensity_factor(year + dt.timedelta(days=i), LAT)
+            for i in range(365)]
+    assert sum(vals) / len(vals) == pytest.approx(1.0, abs=0.02)
+
+
+def test_winter_light_weaker_than_summer():
+    assert (solar.solar_intensity_factor(WINTER, LAT)
+            < 1.0 < solar.solar_intensity_factor(SUMMER, LAT))
+
+
+def test_equator_has_little_seasonal_swing():
+    lo = solar.solar_intensity_factor(WINTER, 0.0)
+    hi = solar.solar_intensity_factor(SUMMER, 0.0)
+    assert abs(hi - lo) < 0.15
+
+
+def test_seasonal_factor_applies_to_placement_lux():
+    plant = make_plant(window="south", distance="near")
+    summer = wm.plant_lux(plant, SUMMER, LAT)
+    winter = wm.plant_lux(plant, WINTER, LAT)
+    annual = wm.plant_lux(plant)  # no date -> unadjusted baseline
+    assert winter < annual < summer
+
+
+def test_seasonal_factor_skips_measured_lux():
+    # A measured value is a snapshot from one season; don't re-scale it.
+    plant = make_plant(light_lux=1500)
+    assert wm.plant_lux(plant, WINTER, LAT) == 1500
+    assert wm.plant_lux(plant, SUMMER, LAT) == 1500
+
+
+def test_winter_lengthens_interval_via_light():
+    cond = wm.Conditions(temp_c=22, humidity_pct=50)
+    plant = make_plant(window="south", distance="near", growth_state="active")
+    summer = wm.watering_recommendation(
+        plant, None, cond, SUMMER, SUMMER, LAT).interval_days
+    winter = wm.watering_recommendation(
+        plant, None, cond, WINTER, WINTER, LAT).interval_days
+    assert winter > summer
+
+
+def test_estimate_lux_never_goes_pitch_black():
+    assert wm.estimate_lux("north", "far", filtered=True) >= wm._MIN_ESTIMATED_LUX
+
+
+def test_unset_window_returns_none():
+    assert wm.estimate_lux(None) is None
+    assert wm.estimate_lux("") is None
+
+
+def test_placement_overrides_stale_measured_lux():
+    # A stale one-off meter reading must not beat where the plant actually sits.
+    plant = make_plant(light_lux=41000, window="north", distance="far")
+    assert wm.plant_lux(plant) == wm.estimate_lux("north", "far")
+    assert wm.plant_lux(plant) < 1000
+
+
+def test_measured_lux_still_used_when_no_placement():
+    assert wm.plant_lux(make_plant(light_lux=1234)) == 1234
+
+
+def test_placement_drives_interval():
+    cond = wm.Conditions(temp_c=22, humidity_pct=50)
+    sunny = _interval(make_plant(window="south", distance="in_window"), cond)
+    dark = _interval(make_plant(window="none"), cond)
+    assert sunny < dark
+
+
+def test_placement_triggers_dim_warning():
+    cond = wm.Conditions(temp_c=22, humidity_pct=50)
+    plant = make_plant(sun="part_shade", window="none")  # band min 350
+    rec = wm.watering_recommendation(plant, None, cond, SUMMER, SUMMER, LAT)
+    assert any("dim" in w for w in rec.warnings)
+
+
 def test_sun_band_flags_too_dim():
     cond = wm.Conditions(temp_c=22, humidity_pct=50)
     plant = make_plant(sun="part_shade", light_lux=100)  # band min 350
@@ -164,6 +289,51 @@ def test_auto_dormancy_stretches_in_winter():
     cond = wm.Conditions(temp_c=22, humidity_pct=50)
     plant = make_plant(growth_state="auto")
     assert _interval(plant, cond, date=WINTER) > _interval(plant, cond, date=SUMMER)
+
+
+def test_evaporation_floor_bounds_winter_loss():
+    # Soil keeps evaporating when the plant is dormant in dim light, so loss
+    # must not multiply down toward zero.
+    plant = make_plant(water_use="dry", soil_type="cactus",
+                       growth_state="dormant", window="north", distance="far")
+    cond = wm.Conditions(temp_c=16, humidity_pct=80)  # cold, damp, minimal demand
+    loss = wm.daily_loss_ml(plant, cond, WINTER, LAT)
+    baseline = (wm._ET_BASE_ML_PER_ML_SOIL * plant.soil_volume_ml
+                * wm.water_use_kc(plant.water_use))
+    assert loss == pytest.approx(wm._EVAP_FLOOR_FRACTION * baseline)
+
+
+def test_floor_does_not_bind_in_summer():
+    # A thirsty plant in good light must be driven by the model, not the floor.
+    plant = make_plant(water_use="wet", window="south", distance="in_window")
+    cond = wm.Conditions(temp_c=26, humidity_pct=35)
+    loss = wm.daily_loss_ml(plant, cond, SUMMER, LAT)
+    baseline = (wm._ET_BASE_ML_PER_ML_SOIL * plant.soil_volume_ml
+                * wm.water_use_kc(plant.water_use))
+    assert loss > wm._EVAP_FLOOR_FRACTION * baseline
+
+
+def test_seasonal_swing_is_plausible_not_extreme():
+    """Winter should stretch the interval roughly 2x, not 5x.
+
+    Three terms key off day length (shorter days, weaker sun, dormancy); this
+    pins the combined effect to something horticulturally sane.
+    """
+    cond = wm.Conditions(temp_c=21, humidity_pct=50)
+    plant = make_plant(water_use="mesic", window="east", distance="near")
+    summer = wm.watering_recommendation(plant, None, cond, SUMMER, SUMMER, LAT).interval_days
+    winter = wm.watering_recommendation(plant, None, cond, WINTER, WINTER, LAT).interval_days
+    assert 1.4 <= winter / summer <= 3.0
+
+
+def test_autumn_and_winter_are_distinguishable():
+    # The old 30-day cap (and later an over-tight floor) collapsed these.
+    cond = wm.Conditions(temp_c=21, humidity_pct=50)
+    plant = make_plant(water_use="dry_mesic", window="north", distance="near")
+    sep = wm.watering_recommendation(
+        plant, None, cond, dt.date(2026, 9, 21), dt.date(2026, 9, 21), LAT).interval_days
+    dec = wm.watering_recommendation(plant, None, cond, WINTER, WINTER, LAT).interval_days
+    assert dec > sep
 
 
 def test_interval_within_guard_rails():

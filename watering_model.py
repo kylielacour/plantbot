@@ -41,7 +41,11 @@ _ET_BASE_ML_PER_ML_SOIL = 0.0215
 
 # Interval guard rails (days).
 MIN_INTERVAL_DAYS = 2
-MAX_INTERVAL_DAYS = 30
+# Raised from 30 once the evaporation floor below gave intervals a *physical*
+# ceiling. At 30 this cap was doing the deciding: in December 20 of 22 plants
+# clamped to it, flattening a real 33-to-180-day spread into one number --
+# which meant winter overwatering, the most common way houseplants die.
+MAX_INTERVAL_DAYS = 60
 
 # Water-use maps garden.org's "Water Preferences" scale to model coefficients.
 # Each state tunes BOTH frequency (via Kc + MAD) and amount (via pour fraction).
@@ -97,6 +101,49 @@ CATEGORY_LUX = {
     "low": 1500.0, "medium": 4000.0, "bright": 12000.0, "direct": 40000.0,
 }
 
+# --------------------------------------------------------- light by placement
+# Where a plant sits is something you can answer by looking; lux is not. Window
+# aspect + distance is the standard way to estimate indoor light, and both facts
+# are objective -- no judging "is this bright?".
+#
+# CALIBRATION: anchored to SUN_TO_LUX, deliberately NOT to meter readings.
+#
+# A spot-metered lux value is a snapshot -- one moment, one sky, one angle --
+# and the same window reads 2,000 on an overcast morning and 20,000 in direct
+# afternoon sun. Plants respond to the daily/seasonal average, so these numbers
+# represent a TYPICAL DAY-AVERAGE at that spot, which is why they look low next
+# to a sunny-afternoon reading and high next to an overcast one.
+#
+# The scale is set so each placement lands on the *ideal* of the garden.org sun
+# category it can actually support:
+#     south @ glass  -> full_sun (5,000)        west @ glass -> sun_to_part (3,000)
+#     west  @ 2-3ft  -> part_shade (1,500)      north @ 2-3ft -> part_to_full (800)
+#     north @ 4-6ft  -> full_shade (400)
+# That makes "where it sits" and "what it wants" the same currency, so the
+# dim/bright warnings are right by construction rather than by measurement.
+WINDOW_LUX = {
+    "south": 5000.0,
+    "west": 3000.0,
+    "east": 2200.0,   # morning sun only -- gentler day-average than west
+    "north": 1200.0,
+    "none": 250.0,    # interior spot with no sightline to a window
+}
+
+# Light falls off fast indoors -- faster than inverse-square, because a window
+# is a small aperture rather than an open sky.
+DISTANCE_FACTOR = {
+    "in_window": 1.00,   # on the sill, against the glass
+    "near": 0.50,        # 2-3 ft
+    "mid": 0.25,         # 4-6 ft
+    "far": 0.10,         # across the room, 7 ft+
+}
+_DEFAULT_DISTANCE = "near"
+
+# Sheer curtain, blinds, or trees/porch/neighbour shading the window outside.
+_FILTERED_FACTOR = 0.55
+# Even a "dark" corner of a lived-in room isn't pitch black (= full_shade min).
+_MIN_ESTIMATED_LUX = 60.0
+
 # Plant-available water capacity (AWC) as a fraction of soil volume, by soil type.
 AWC_FRACTION = {
     "standard": 0.35,
@@ -110,6 +157,21 @@ _DEFAULT_AWC = 0.35
 
 # Safety factor on the pour for pots without drainage (avoid pooling).
 _NO_DRAINAGE_FACTOR = 0.8
+
+# How far dormancy alone can slow a plant's water use (see growth_factor).
+_DORMANT_FACTOR = 0.65
+
+# Water use never falls below this fraction of the plant's own baseline demand.
+# Soil keeps evaporating from the surface and roots keep respiring even when the
+# plant is fully dormant in dim light, so the seasonal factors must not be able
+# to multiply loss arbitrarily close to zero. This is what actually bounds the
+# winter interval -- a physical floor rather than an arbitrary day count.
+#
+# Tuned by sweep: 0.50 flattened autumn (Sep and Dec came out identical for
+# half the collection), 0.20 let winter run away again. At 0.30 the median
+# plant waters about half as often in December as in June, which is the
+# standard houseplant rule of thumb.
+_EVAP_FLOOR_FRACTION = 0.30
 
 
 # --------------------------------------------------------------- data classes
@@ -144,9 +206,13 @@ class Plant:
     name: str
     soil_volume_ml: float
     soil_type: str = "standard"
-    light: str = "medium"            # legacy category, superseded by light_lux/sun
-    light_lux: float | None = None   # measured lux at the plant (drives the math)
+    light: str = "medium"            # legacy category, superseded by placement/sun
+    light_lux: float | None = None   # measured lux; manual override, rarely set
     sun: str | None = None           # garden.org Sun Requirement (key into SUN_TO_LUX)
+    # Where the plant sits -- the primary light input (see WINDOW_LUX).
+    window: str | None = None        # south | west | east | north | none
+    distance: str = _DEFAULT_DISTANCE  # in_window | near | mid | far
+    light_filtered: bool = False     # sheer curtain / blinds / shade outside
     water_use: str = "mesic"         # key into WATER_USE_KC (garden.org Water Pref)
     growth_state: str = "auto"       # active | dormant | auto
     has_drainage: bool = True
@@ -198,11 +264,52 @@ def sun_band(sun: str | None) -> tuple[float, float, float] | None:
     return SUN_TO_LUX.get((sun or "").lower())
 
 
-def effective_lux(plant: Plant, conditions: "Conditions | None" = None) -> float:
-    """The lux to use for a plant: measured value first, then a live sensor, then
-    the garden.org sun default, then the legacy light category."""
-    if plant.light_lux is not None:
+def estimate_lux(window: str | None, distance: str | None = None,
+                 filtered: bool = False) -> float | None:
+    """Estimated lux at the plant from where it sits. None if no window set."""
+    base = WINDOW_LUX.get((window or "").lower())
+    if base is None:
+        return None
+    if (window or "").lower() == "none":
+        lux = base  # distance from a window is meaningless when there isn't one
+    else:
+        lux = base * DISTANCE_FACTOR.get(
+            (distance or _DEFAULT_DISTANCE).lower(),
+            DISTANCE_FACTOR[_DEFAULT_DISTANCE],
+        )
+    if filtered:
+        lux *= _FILTERED_FACTOR
+    return max(lux, _MIN_ESTIMATED_LUX)
+
+
+def plant_lux(plant: Plant, date: dt.date | None = None,
+              latitude_deg: float | None = None) -> float | None:
+    """Lux from the plant's own config: placement first, then a measured value.
+
+    Placement wins because it's the input that's actually maintained -- a stale
+    one-off meter reading shouldn't override where the plant demonstrably sits.
+
+    With ``date`` and ``latitude_deg``, the placement estimate is adjusted for
+    season (see solar.solar_intensity_factor). A *measured* value is left alone:
+    it's a snapshot the user took in some particular season, so re-scaling it
+    would compound one season's reading with another's.
+    """
+    est = estimate_lux(plant.window, plant.distance, plant.light_filtered)
+    if est is None:
         return plant.light_lux
+    if date is not None and latitude_deg is not None:
+        est *= solar.solar_intensity_factor(date, latitude_deg)
+    return est
+
+
+def effective_lux(plant: Plant, conditions: "Conditions | None" = None,
+                  date: dt.date | None = None,
+                  latitude_deg: float | None = None) -> float:
+    """The lux to use for a plant: its placement/measured value first, then a
+    live sensor, then the garden.org sun default, then the legacy category."""
+    own = plant_lux(plant, date, latitude_deg)
+    if own is not None:
+        return own
     if conditions is not None and conditions.lux is not None:
         return conditions.lux
     band = sun_band(plant.sun)
@@ -224,19 +331,27 @@ def season_factor(date: dt.date, latitude_deg: float) -> float:
 
 
 def growth_factor(growth_state: str, date: dt.date, latitude_deg: float) -> float:
-    """active -> 1.0, dormant -> 0.4, auto -> derived from day length.
+    """active -> 1.0, dormant -> _DORMANT_FACTOR, auto -> derived from day length.
 
     ``auto`` is the dormancy-detection add-on: short winter days pull the plant
     toward dormancy and stretch the interval.
+
+    Dormancy is a *third* day-length-driven term, stacked on top of shorter days
+    (season_factor) and weaker winter light (solar_intensity_factor). All three
+    say "it is winter", so multiplying them compounded a ~2x effect into ~9x.
+    The floor is deliberately gentle for that reason -- the seasonal slowdown is
+    mostly already represented by the other two.
     """
     state = (growth_state or "auto").lower()
     if state == "active":
         return 1.0
     if state == "dormant":
-        return 0.4
-    # auto: ramp 0.4 (<=9h daylight) up to 1.0 (>=14h daylight)
+        return _DORMANT_FACTOR
+    # auto: ramp _DORMANT_FACTOR (<=9h daylight) up to 1.0 (>=14h daylight)
     length = solar.day_length_hours(date, latitude_deg)
-    return clamp(0.4 + 0.6 * (length - 9.0) / (14.0 - 9.0), 0.4, 1.0)
+    span = 1.0 - _DORMANT_FACTOR
+    return clamp(_DORMANT_FACTOR + span * (length - 9.0) / (14.0 - 9.0),
+                 _DORMANT_FACTOR, 1.0)
 
 
 def water_use_kc(water_use: str) -> float:
@@ -274,21 +389,17 @@ def daily_loss_ml(plant: Plant, conditions: Conditions, date: dt.date,
                   latitude_deg: float) -> float:
     """Estimated water lost per day (evapotranspiration)."""
     f_vpd = vpd_factor(conditions.temp_c, conditions.humidity_pct)
-    f_light = lux_to_factor(effective_lux(plant, conditions))
+    f_light = lux_to_factor(effective_lux(plant, conditions, date, latitude_deg))
     f_season = season_factor(date, latitude_deg)
     f_growth = growth_factor(plant.growth_state, date, latitude_deg)
     kc = water_use_kc(plant.water_use)
 
-    loss = (
-        _ET_BASE_ML_PER_ML_SOIL
-        * plant.soil_volume_ml
-        * f_vpd
-        * f_light
-        * f_season
-        * f_growth
-        * kc
-    )
-    return max(loss, 0.1)  # never divide by ~zero
+    # Baseline demand for this pot, before any seasonal/climate modulation.
+    baseline = _ET_BASE_ML_PER_ML_SOIL * plant.soil_volume_ml * kc
+    loss = baseline * f_vpd * f_light * f_season * f_growth
+    # Floor is relative to the plant's *own* baseline, so a cactus floors at a
+    # cactus's rate; an absolute floor would bind year-round for low-kc plants.
+    return max(loss, _EVAP_FLOOR_FRACTION * baseline, 0.1)
 
 
 def pour_amount_ml(plant: Plant, species: SpeciesData | None = None) -> float:
@@ -301,15 +412,17 @@ def pour_amount_ml(plant: Plant, species: SpeciesData | None = None) -> float:
 
 
 def _comfort_warnings(plant: Plant, species: SpeciesData | None,
-                      conditions: Conditions) -> list[str]:
+                      conditions: Conditions, date: dt.date | None = None,
+                      latitude_deg: float | None = None) -> list[str]:
     warnings: list[str] = []
     band = sun_band(plant.sun)
-    if band and plant.light_lux is not None:
+    lux = plant_lux(plant, date, latitude_deg)
+    if band and lux is not None:
         lo, _, hi = band
-        if plant.light_lux < lo:
-            warnings.append(f"dim: {plant.light_lux:.0f} lux below ideal {lo:.0f}")
-        elif plant.light_lux > hi:
-            warnings.append(f"bright: {plant.light_lux:.0f} lux above ideal {hi:.0f}")
+        if lux < lo:
+            warnings.append(f"dim: {lux:.0f} lux below ideal {lo:.0f}")
+        elif lux > hi:
+            warnings.append(f"bright: {lux:.0f} lux above ideal {hi:.0f}")
     if species is not None:
         t = conditions.temp_c
         if species.min_temp is not None and t < species.min_temp:
@@ -359,7 +472,7 @@ def watering_recommendation(
             next_date = today
 
     f_vpd = vpd_factor(conditions.temp_c, conditions.humidity_pct)
-    f_light = lux_to_factor(effective_lux(plant, conditions))
+    f_light = lux_to_factor(effective_lux(plant, conditions, today, latitude_deg))
     f_growth = growth_factor(plant.growth_state, today, latitude_deg)
     explanation = (
         f"{_describe(f_vpd, f_light, f_growth)} -> every {interval} days "
@@ -372,5 +485,5 @@ def watering_recommendation(
         amount_ml=amount,
         daily_loss_ml=loss,
         explanation=explanation,
-        warnings=_comfort_warnings(plant, species, conditions),
+        warnings=_comfort_warnings(plant, species, conditions, today, latitude_deg),
     )

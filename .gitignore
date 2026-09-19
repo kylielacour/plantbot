@@ -18,3 +18,4 @@ plants.yaml
 
 # Claude worktree pool (embedded checkouts)
 .claude/worktrees/
+.env.bak.*

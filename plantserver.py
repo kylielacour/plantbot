@@ -23,6 +23,7 @@ from flask import Flask, jsonify, request
 
 import climate
 import plantstore
+import solar
 import watering_model
 from openplantbook import OpenPlantbook
 from units import ml_to_cups_str
@@ -91,7 +92,10 @@ def _climate():
 def api_climate():
     cond, desc = _climate()
     return jsonify({"source": desc, "temp_c": round(cond.temp_c, 1),
-                    "humidity_pct": round(cond.humidity_pct), "lux": cond.lux})
+                    "humidity_pct": round(cond.humidity_pct), "lux": cond.lux,
+                    # The page mirrors the seasonal math, so it needs the same
+                    # latitude the server is configured with.
+                    "latitude": LATITUDE})
 
 
 @app.get("/api/schedule")
@@ -123,7 +127,10 @@ def api_schedule():
             "last_watered": last.isoformat() if last else None,
             "water_use": plant.water_use,
             "sun": plant.sun,
-            "current_lux": round(plant.light_lux) if plant.light_lux is not None else None,
+            "current_lux": (round(lux) if (lux := watering_model.plant_lux(
+                plant, today, LATITUDE)) is not None else None),
+            "lux_estimated": plant.window is not None,
+            "season_factor": round(solar.solar_intensity_factor(today, LATITUDE), 2),
             "ideal_lux": ({"min": band[0], "ideal": band[1], "max": band[2]} if band else None),
         })
     return jsonify(out)
@@ -184,6 +191,9 @@ button.primary{background:var(--accent);color:#fff;border-color:var(--accent);fo
 .mgrid input[type=range]{width:100%}
 .mgrid input[type=number],.mgrid select{width:100%;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--ink)}
 .mgrid .hint{font-size:.74rem;color:var(--muted);margin-top:8px}
+.estbox{padding:7px 9px;border:1px dashed var(--line);border-radius:9px;background:transparent}
+.estbox b{font-size:1.05rem}
+.muted{color:var(--muted);font-size:.8rem}
 .mout{display:flex;gap:10px;margin:15px 0 4px}
 .metric{flex:1;background:var(--accent-soft);border-radius:11px;padding:11px 12px}
 .metric small{color:var(--muted);font-size:.72rem}.metric b{display:block;font-size:1.35rem;margin-top:1px}
@@ -208,7 +218,10 @@ button.primary{background:var(--accent);color:#fff;border-color:var(--accent);fo
     <label>Name</label><input type=text id=m-name>
     <label>Soil volume — <span id=m-volout></span></label><input type=range id=m-vol min=100 max=25000 step=50>
     <label>Soil type</label><select id=m-soil></select>
-    <label>Measured light — <span id=m-luxout></span> lux (<span id=m-luxword></span>)</label><input type=range id=m-lux min=0 max=1000 step=1>
+    <label>Nearest window</label><select id=m-window></select>
+    <label id=m-distlabel>Distance from it</label><select id=m-dist></select>
+    <label><input type=checkbox id=m-filt style="width:auto"> sheer curtain, blinds, or shade outside</label>
+    <label id=m-lightlabel>Light there</label><div class=estbox><b id=m-luxout></b> lux <span id=m-luxword class=muted></span><div id=m-seasonnote class=muted></div></div>
     <label>Sun requirement</label><select id=m-sun></select>
     <label>Water preference</label><select id=m-wu></select>
     <label>Growth</label><select id=m-grow></select>
@@ -227,12 +240,35 @@ var SOIL=["standard","peat","coco","aroid","cactus","moisture"];
 var GROW=["auto","active","dormant"];
 var WU=[["dry","Dry"],["dry_mesic","Dry-Mesic"],["mesic","Mesic"],["wet_mesic","Wet-Mesic"],["wet","Wet"]];
 var SUN=[["","— not set —"],["full_sun","Full sun"],["sun_to_part_shade","Sun – part shade"],["part_shade","Part / dappled shade"],["part_to_full_shade","Part – full shade"],["full_shade","Full shade"]];
+var WINDOW=[["","— not set —"],["south","South-facing"],["west","West-facing"],["east","East-facing"],["north","North-facing"],["none","No window nearby"]];
+var DIST=[["in_window","In the window / on the sill"],["near","2–3 feet away"],["mid","4–6 feet away"],["far","Across the room (7 ft+)"]];
+// Mirrors watering_model.WINDOW_LUX / DISTANCE_FACTOR — calibrated to this house.
+var WINLUX={south:5000,west:3000,east:2200,north:1200,none:250};
+// Mirrors watering_model.SUN_TO_LUX — (min, ideal, max) lux per sun category.
+var SUNLUX={full_sun:[1200,5000,20000],sun_to_part_shade:[700,3000,12000],part_shade:[350,1500,7000],part_to_full_shade:[150,800,4000],full_shade:[60,400,2000]};
+var DISTF={in_window:1.0,near:.50,mid:.25,far:.10};
+var FILTF=.55,MINLUX=60;
+function estLux(win,dist,filt){if(!win||!(win in WINLUX))return null;
+  var l=(win==='none')?WINLUX[win]:WINLUX[win]*(DISTF[dist]||DISTF.near);
+  if(filt)l*=FILTF;return Math.max(l,MINLUX);}
+// Mirrors solar.solar_intensity_factor — winter sun sits lower, so the same
+// spot gets weaker light per hour. Normalised to average 1.0 over the year.
+function declDeg(d){return 23.45*Math.sin(2*Math.PI*(284+d)/365);}
+function noonAlt(d){return 90-Math.abs(LAT-declDeg(d));}
+// Computed lazily and cached: at parse time `var LAT` is hoisted but still
+// undefined, and the server sends the real latitude later via /api/climate.
+var _meanSin=null;
+function meanSin(){if(_meanSin===null){var t=0;for(var i=1;i<=365;i++)t+=Math.sin(Math.max(noonAlt(i),0)*Math.PI/180);_meanSin=t/365;}return _meanSin;}
+function solarI(d){var m=meanSin();if(!(m>0))return 1;
+  var v=Math.sin(Math.max(noonAlt(d),0)*Math.PI/180)/m;return v>0.05?v:0.05;}
 var WU_ALIAS={low:"dry",medium:"mesic",high:"wet"};
 var AWC={standard:.35,peat:.38,coco:.40,aroid:.28,cactus:.22,moisture:.45};
 var KC={dry:.30,dry_mesic:.55,mesic:1.0,wet_mesic:1.25,wet:1.45,low:.30,medium:1.0,high:1.45};
 var MAD={dry:.90,dry_mesic:.70,mesic:.50,wet_mesic:.40,wet:.30,low:.90,medium:.50,high:.30};
 var POUR={dry:.06,dry_mesic:.07,mesic:.08,wet_mesic:.09,wet:.10,low:.06,medium:.08,high:.10};
 var ET=0.0215,ND=0.8,LAT=40,MLCUP=236.588,MLTB=14.7868;
+// Mirrors watering_model: dormancy floor, evaporation floor, interval bounds.
+var DORM=0.65,EVAPFLOOR=0.30,IVMIN=2,IVMAX=60;
 var MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 var plants=[],sched={},climF=72,climHum=50,curMonth=new Date().getMonth()+1,mId=null;
 function $(id){return document.getElementById(id);}
@@ -242,7 +278,8 @@ function svp(t){return 0.6108*Math.exp(17.27*t/(t+237.3));}
 var VREF=svp(21)*0.5;
 function luxF(l){return clamp(0.55*Math.log10(Math.max(l,1))-1.05,0.5,1.7);}
 function dayLen(d){var dec=23.45*Math.sin(2*Math.PI*(284+d)/365)*Math.PI/180,p=LAT*Math.PI/180,c=-Math.tan(p)*Math.tan(dec);if(c>=1)return 0;if(c<=-1)return 24;return 2*Math.acos(c)*180/Math.PI/15;}
-function luxWord(l){return l<2500?'dim':l<7000?'moderate':l<20000?'bright indirect':'direct sun';}
+// Words for the indoor day-average scale (tops out ~5k at a south window).
+function luxWord(l){return l<300?'very dim':l<900?'dim':l<2000?'moderate':l<4000?'bright':'very bright';}
 function luxFromSlider(v){return Math.round(Math.pow(10,2+(v/1000)*3));}
 function sliderFromLux(l){return Math.round((Math.log10(Math.max(l||4000,100))-2)/3*1000);}
 function luxPos(l){return clamp((Math.log10(Math.max(l||1,50))-2)/3,0,1)*100;}
@@ -265,7 +302,8 @@ function card(p){
   var due=s.due_in<=0?'<span class="due now">due now</span>':'<span class=due>in '+s.due_in+'d</span>';
   var warns=(s.warnings||[]).map(function(w){return '<span class="pill warn">⚠ '+esc(w)+'</span>';}).join('');
   var idl=s.ideal_lux;
-  var lr=idl?('current '+(s.current_lux!=null?fmtLux(s.current_lux):'—')+' · ideal '+fmtLux(idl.min)+'–'+fmtLux(idl.max)+' lux'):'no ideal set';
+  var cur=s.current_lux!=null?((s.lux_estimated?'~':'')+fmtLux(s.current_lux)):'not set';
+  var lr=idl?(cur+' · ideal '+fmtLux(idl.min)+'–'+fmtLux(idl.max)+' lux'):'no ideal set';
   var needPills='<span class=pill>💧 '+esc(label(WU,normWU(s.water_use)))+'</span>'+(s.sun?'<span class=pill>☀ '+esc(label(SUN,s.sun))+'</span>':'');
   return '<div class=card><div class=chead><h2>'+esc(p.name)+'</h2>'+(s.interval_days?due:'')+'</div>'
     +'<div class=sched>💧 every '+(s.interval_days||'—')+' days · <span class=amt>'+(s.amount_str||'—')+'</span></div>'
@@ -280,34 +318,62 @@ function selOpts(list){return list.map(function(o){var k=Array.isArray(o)?o[0]:o
 function loadSchedule(){return fetch('api/schedule').then(function(r){return r.json();}).then(function(list){sched={};list.forEach(function(s){sched[s.id]=s;});render();});}
 function loadClimate(){fetch('api/climate').then(function(r){return r.json();}).then(function(c){
   var tf=Math.round(c.temp_c*9/5+32);climF=tf;climHum=Math.round(c.humidity_pct);
+  if(typeof c.latitude==='number'&&c.latitude!==LAT){LAT=c.latitude;_meanSin=null;}
   $('climate').textContent='Climate: '+c.source+' — '+tf+'°F / '+c.humidity_pct+'% RH';});}
 function loadAll(){fetch('api/plants').then(function(r){return r.json();}).then(function(d){plants=d.plants||[];render();loadSchedule();loadClimate();});}
 
 $('add').onclick=function(){var name=prompt('Name of the new plant:');if(!name)return;
   var id=name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||('plant-'+Date.now());
   if(plants.some(function(x){return x.id===id;}))id=id+'-'+Date.now();
-  plants.push({id:id,name:name,soil_volume_ml:1000,soil_type:'standard',sun:'part_shade',water_use:'mesic',growth_state:'auto',has_drainage:true});
+  plants.push({id:id,name:name,soil_volume_ml:1000,soil_type:'standard',sun:'part_shade',water_use:'mesic',growth_state:'auto',has_drainage:true,window:null,distance:'near',light_filtered:false});
   render();persist('Added '+name);openTune(id);};
 
 $('m-soil').innerHTML=selOpts(SOIL);$('m-grow').innerHTML=selOpts(GROW);$('m-wu').innerHTML=selOpts(WU);$('m-sun').innerHTML=selOpts(SUN);
+$('m-window').innerHTML=selOpts(WINDOW);$('m-dist').innerHTML=selOpts(DIST);
+
+// Lux for the live preview: placement if set, else a legacy measured value,
+// else the ideal for the plant's sun requirement.
+function tuneLux(){
+  var est=estLux($('m-window').value,$('m-dist').value,$('m-filt').checked);
+  // Seasonal adjustment applies to a placement estimate only -- a measured
+  // value is already a snapshot from whatever season it was taken in.
+  if(est!=null)return Math.round(est*solarI(Math.round((curMonth-0.5)*30.42)));
+  var p=plants.filter(function(x){return x.id===mId;})[0];
+  if(p&&p.light_lux!=null)return Math.round(p.light_lux);
+  var b=SUNLUX[$('m-sun').value];return b?b[1]:4000;
+}
+// Distance is meaningless with no window (or none chosen yet).
+function syncDistRow(){var w=$('m-window').value,off=(!w||w==='none');
+  $('m-dist').style.display=off?'none':'';$('m-distlabel').style.display=off?'none':'';}
 
 function fbar(nm,m){var w=clamp(m/2*100,0,100);return '<div class=fbar><span class=nm>'+nm+'</span><span class=tr><span class=fl style="width:'+w.toFixed(0)+'%"></span></span><span class=vl>'+m.toFixed(2)+'×</span></div>';}
 function computeTune(){
-  var vol=+$('m-vol').value,soil=$('m-soil').value,lux=luxFromSlider(+$('m-lux').value),wu=$('m-wu').value,grow=$('m-grow').value,drain=$('m-drain').checked;
+  syncDistRow();
+  var vol=+$('m-vol').value,soil=$('m-soil').value,lux=tuneLux(),wu=$('m-wu').value,grow=$('m-grow').value,drain=$('m-drain').checked;
   var tC=(climF-32)*5/9,hum=climHum,doy=Math.round((curMonth-0.5)*30.42);
   $('m-volout').textContent=vol>=1000?(vol/1000).toFixed(1)+' L':vol+' ml';
-  $('m-luxout').textContent=lux;$('m-luxword').textContent=luxWord(lux);
+  var band=SUNLUX[$('m-sun').value],fit='';
+  if(band)fit=lux<band[0]?' · below ideal':lux>band[2]?' · above ideal':' · in range';
+  $('m-luxout').textContent=lux;$('m-luxword').textContent='('+luxWord(lux)+')'+fit;
+  var placed=estLux($('m-window').value,$('m-dist').value,$('m-filt').checked)!=null;
+  $('m-lightlabel').textContent=placed?('Light there — '+MON[curMonth-1]):'Light there';
+  if(placed){var sf=solarI(Math.round((curMonth-0.5)*30.42)),
+      jun=Math.round(estLux($('m-window').value,$('m-dist').value,$('m-filt').checked)*solarI(172)),
+      dec=Math.round(estLux($('m-window').value,$('m-dist').value,$('m-filt').checked)*solarI(355));
+    $('m-seasonnote').textContent='sun is '+(sf>=1?'+':'')+Math.round((sf-1)*100)+'% vs annual average · Jun '+jun+' / Dec '+dec;
+  } else $('m-seasonnote').textContent='';
   var fv=clamp(svp(tC)*(1-hum/100)/VREF,0.4,2.5),fl=luxF(lux),L=dayLen(doy),
-      fs=clamp(0.5+0.5*(L/12),0.5,1.4),fg=grow==='active'?1:grow==='dormant'?0.4:clamp(0.4+0.6*(L-9)/5,0.4,1),kc=KC[wu]||1;
+      fs=clamp(0.5+0.5*(L/12),0.5,1.4),fg=grow==='active'?1:grow==='dormant'?DORM:clamp(DORM+(1-DORM)*(L-9)/5,DORM,1),kc=KC[wu]||1;
   var dep=vol*(AWC[soil]||.35)*(MAD[wu]||.5),amt=(POUR[wu]||.08)*vol*(drain?1:ND),
-      loss=Math.max(ET*vol*fv*fl*fs*fg*kc,0.1),iv=Math.round(clamp(dep/loss,2,30));
+      base=ET*vol*kc,loss=Math.max(base*fv*fl*fs*fg,EVAPFLOOR*base,0.1),iv=Math.round(clamp(dep/loss,IVMIN,IVMAX));
   $('m-interval').textContent=iv;$('m-amount').textContent=cups(amt);
   $('m-factors').innerHTML=fbar('dryness',fv)+fbar('light',fl)+fbar('season',fs)+fbar('growth',fg)+fbar('water-use',kc);
 }
 function openTune(id){var p=plants.filter(function(x){return x.id===id;})[0];if(!p)return;mId=id;
   $('m-title').textContent=p.name||id;$('m-name').value=p.name||'';
   $('m-vol').value=p.soil_volume_ml||1000;$('m-soil').value=p.soil_type||'standard';
-  $('m-lux').value=sliderFromLux(p.light_lux||4000);$('m-sun').value=p.sun||'';$('m-wu').value=normWU(p.water_use);
+  $('m-window').value=p.window||'';$('m-dist').value=p.distance||'near';$('m-filt').checked=!!p.light_filtered;
+  $('m-sun').value=p.sun||'';$('m-wu').value=normWU(p.water_use);
   $('m-grow').value=p.growth_state||'auto';$('m-drain').checked=p.has_drainage!==false;
   computeTune();$('modal').style.display='flex';document.body.style.overflow='hidden';}
 function closeTune(){$('modal').style.display='none';document.body.style.overflow='';}
@@ -316,12 +382,15 @@ function persist(msg){fetch('api/plants',{method:'POST',headers:{'Content-Type':
   .then(function(r){return r.json();}).then(function(res){toast(res.error?('error: '+res.error):(msg||'Saved'));loadSchedule();});}
 function applyTune(){var p=plants.filter(function(x){return x.id===mId;})[0];if(p){
     p.name=$('m-name').value.trim()||p.id;
-    p.soil_volume_ml=+$('m-vol').value;p.soil_type=$('m-soil').value;p.light_lux=luxFromSlider(+$('m-lux').value);
+    p.soil_volume_ml=+$('m-vol').value;p.soil_type=$('m-soil').value;
+    p.window=$('m-window').value||null;p.distance=$('m-dist').value;p.light_filtered=$('m-filt').checked;
+    // Placement supersedes any old meter reading; drop it so it can't linger.
+    if(p.window)p.light_lux=null;
     p.sun=$('m-sun').value||null;p.water_use=$('m-wu').value;p.growth_state=$('m-grow').value;p.has_drainage=$('m-drain').checked;
     render();persist('Saved '+p.name);}closeTune();}
 
 $('grid').addEventListener('click',function(e){var b=e.target.closest('.edit');if(b)openTune(b.getAttribute('data-id'));});
-['m-vol','m-soil','m-lux','m-wu','m-grow','m-drain'].forEach(function(id){$(id).addEventListener('input',computeTune);});
+['m-vol','m-soil','m-window','m-dist','m-filt','m-sun','m-wu','m-grow','m-drain'].forEach(function(id){$(id).addEventListener('input',computeTune);});
 $('m-apply').onclick=applyTune;$('m-cancel').onclick=closeTune;$('m-close').onclick=closeTune;
 $('modal').addEventListener('click',function(e){if(e.target===$('modal'))closeTune();});
 loadAll();

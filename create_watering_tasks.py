@@ -35,22 +35,37 @@ def escape(s: str) -> str:
 
 
 # ===== Things (dedupe by plant_id) =====
+# Scan the built-in lists rather than the project. A task that failed to get
+# filed into the project is still a real open task, and dedupe must see it --
+# scoping this to the project is what let duplicates through. The lists overlap
+# (Today is a subset of Anytime); harmless, since we collect into a set.
+# App-wide `to dos whose status is open` also works but takes ~100s; this is ~5s.
+_OPEN_LISTS = ["Inbox", "Today", "Anytime", "Upcoming", "Someday"]
+
+
 def get_open_plant_ids() -> set[str]:
+    lists = ", ".join(f'"{escape(name)}"' for name in _OPEN_LISTS)
     applescript = f'''
 tell application "Things3"
-  tell project "{escape(THINGS_PROJECT)}"
-    set ids to {{}}
-    repeat with t in (to dos whose status is open)
-      set n to notes of t
-      if n contains "plant_id:" then
-        set end of ids to n
-      end if
-    end repeat
-    return ids
-  end tell
+  set ids to {{}}
+  repeat with lname in {{{lists}}}
+    try
+      repeat with t in (to dos of list lname)
+        set n to notes of t
+        if n contains "plant_id:" then
+          set end of ids to n
+        end if
+      end repeat
+    end try
+  end repeat
+  return ids
 end tell
 '''
     p = subprocess.run(["osascript", "-e", applescript], capture_output=True, text=True)
+    if p.returncode != 0:
+        # Never fall through to "no open tasks" on an error -- that creates
+        # duplicates on every run. Fail loudly instead.
+        raise RuntimeError(f"Could not read open tasks from Things: {p.stderr.strip()}")
     return {m.group(1) for m in re.finditer(r"plant_id:\s*([\w-]+)", p.stdout or "")}
 
 
@@ -84,14 +99,16 @@ end tell
 
 
 def create_things_task(title: str, notes: str, days_offset: int = 0) -> None:
+    # `make new to do` inside `tell project ...` does NOT file the task into
+    # that project -- it lands loose in Anytime with no project. The project has
+    # to be assigned explicitly afterwards.
     applescript = f'''
 tell application "Things3"
-  tell project "{escape(THINGS_PROJECT)}"
-    set newTodo to make new to do
-    set name of newTodo to "{escape(title)}"
-    set notes of newTodo to "{escape(notes)}"
-    set due date of newTodo to ((current date) + ({days_offset} * days))
-  end tell
+  set newTodo to make new to do
+  set name of newTodo to "{escape(title)}"
+  set notes of newTodo to "{escape(notes)}"
+  set due date of newTodo to ((current date) + ({days_offset} * days))
+  set project of newTodo to project "{escape(THINGS_PROJECT)}"
 end tell
 '''
     subprocess.run(["osascript", "-e", applescript], check=True)
@@ -127,13 +144,15 @@ def main(dry_run: bool = False) -> None:
 
         base_species = None
         if opb and entry.pid:
-            base_species = opb.cached_species_data(entry.pid)
-            if base_species is None:
-                # Not cached yet -- fetch on demand (also warms the cache).
-                try:
-                    base_species = opb.species_data(entry.pid)
-                except Exception as e:
-                    print(f"  ! OPB fetch failed for {entry.pid}: {e}")
+            # Fetches on demand and warms the cache; returns None (quietly, and
+            # only once) for a species OPB simply doesn't carry.
+            try:
+                base_species = opb.species_data_or_none(entry.pid)
+                if base_species is None:
+                    print(f"  note: no Open Plantbook entry for '{entry.pid}'"
+                          f" -- using per-plant overrides/defaults")
+            except Exception as e:
+                print(f"  ! OPB fetch failed for {entry.pid}: {e}")
         species = entry.species_with_overrides(base_species)
 
         last_watered = state.get_last_watered(plant.id)
