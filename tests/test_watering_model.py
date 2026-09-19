@@ -121,9 +121,26 @@ def test_five_level_water_use_interval_monotonic():
 
 
 def test_legacy_water_use_aliases():
-    assert wm.water_use_kc("low") == wm.water_use_kc("dry")
-    assert wm.water_use_kc("medium") == wm.water_use_kc("mesic")
-    assert wm.water_use_kc("high") == wm.water_use_kc("wet")
+    assert wm.allowed_depletion("low") == wm.allowed_depletion("dry")
+    assert wm.allowed_depletion("medium") == wm.allowed_depletion("mesic")
+    assert wm.allowed_depletion("high") == wm.allowed_depletion("wet")
+
+
+def test_leaf_type_drives_transpiration_not_water_preference():
+    """garden.org gives ZZ and pothos the same water preference, but a CAM
+    succulent drinks far slower than a thin-leaved aroid. Leaf type is what
+    separates them."""
+    cond = wm.Conditions(temp_c=21, humidity_pct=50)
+    zz = make_plant(water_use="mesic", leaf_type="succulent")
+    pothos = make_plant(water_use="mesic", leaf_type="normal")
+    assert _interval(zz, cond) > _interval(pothos, cond) * 2
+
+
+def test_leaf_kc_ordering_and_default():
+    assert (wm.leaf_kc("succulent") < wm.leaf_kc("waxy")
+            < wm.leaf_kc("normal") < wm.leaf_kc("thin"))
+    assert wm.leaf_kc(None) == wm.leaf_kc("normal")
+    assert wm.leaf_kc("nonsense") == wm.leaf_kc("normal")
 
 
 # ------------------------------------------------------- light by placement
@@ -322,8 +339,9 @@ def test_evaporation_floor_bounds_winter_loss():
                        growth_state="dormant", window="north", distance="far")
     cond = wm.Conditions(temp_c=16, humidity_pct=80)  # cold, damp, minimal demand
     loss = wm.daily_loss_ml(plant, cond, WINTER, LAT)
-    baseline = (wm._ET_BASE_ML_PER_ML_SOIL * plant.soil_volume_ml
-                * wm.water_use_kc(plant.water_use))
+    baseline = (wm._ET_BASE_ML_PER_ML_SOIL
+                * wm._evaporating_volume_ml(plant.soil_volume_ml)
+                * wm.leaf_kc(plant.leaf_type))
     assert loss == pytest.approx(wm._EVAP_FLOOR_FRACTION * baseline)
 
 
@@ -332,8 +350,9 @@ def test_floor_does_not_bind_in_summer():
     plant = make_plant(water_use="wet", window="south", distance="in_window")
     cond = wm.Conditions(temp_c=26, humidity_pct=35)
     loss = wm.daily_loss_ml(plant, cond, SUMMER, LAT)
-    baseline = (wm._ET_BASE_ML_PER_ML_SOIL * plant.soil_volume_ml
-                * wm.water_use_kc(plant.water_use))
+    baseline = (wm._ET_BASE_ML_PER_ML_SOIL
+                * wm._evaporating_volume_ml(plant.soil_volume_ml)
+                * wm.leaf_kc(plant.leaf_type))
     assert loss > wm._EVAP_FLOOR_FRACTION * baseline
 
 

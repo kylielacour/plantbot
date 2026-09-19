@@ -90,6 +90,7 @@ def plant_entry_from_dict(raw: dict[str, Any]) -> PlantEntry:
         distance=str(raw.get("distance") or "near"),
         light_filtered=bool(raw.get("light_filtered", False)),
         water_use=str(raw.get("water_use", "mesic")),
+        leaf_type=str(raw.get("leaf_type") or "normal"),
         growth_state=str(raw.get("growth_state", "auto")),
         has_drainage=bool(raw.get("has_drainage", True)),
     )

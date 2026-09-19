@@ -126,6 +126,7 @@ def api_schedule():
             "warnings": rec.warnings,
             "last_watered": last.isoformat() if last else None,
             "water_use": plant.water_use,
+            "leaf_type": plant.leaf_type,
             "sun": plant.sun,
             "current_lux": (round(lux) if (lux := watering_model.plant_lux(
                 plant, today, LATITUDE)) is not None else None),
@@ -223,7 +224,8 @@ button.primary{background:var(--accent);color:#fff;border-color:var(--accent);fo
     <label><input type=checkbox id=m-filt style="width:auto"> sheer curtain, blinds, or shade outside</label>
     <label id=m-lightlabel>Light there</label><div class=estbox><b id=m-luxout></b> lux <span id=m-luxword class=muted></span><div id=m-seasonnote class=muted></div></div>
     <label>Sun requirement</label><select id=m-sun></select>
-    <label>Water preference</label><select id=m-wu></select>
+    <label>Water preference <span class=muted>(garden.org)</span></label><select id=m-wu></select>
+    <label>Leaf type</label><select id=m-leaf></select>
     <label>Growth</label><select id=m-grow></select>
     <label><input type=checkbox id=m-drain style="width:auto"> has a drainage hole</label>
   </div>
@@ -262,8 +264,11 @@ function meanSin(){if(_meanSin===null){var t=0;for(var i=1;i<=365;i++)t+=Math.si
 function solarI(d){var m=meanSin();if(!(m>0))return 1;
   var v=Math.sin(Math.max(noonAlt(d),0)*Math.PI/180)/m;return v>0.05?v:0.05;}
 var WU_ALIAS={low:"dry",medium:"mesic",high:"wet"};
+var LEAF=[["succulent","Succulent / cactus"],["waxy","Thick or waxy leaves"],["normal","Normal foliage"],["thin","Thin or fine leaves"]];
+// Kc comes from leaf type, not water preference: garden.org gives ZZ and
+// pothos the same preference but they drink at completely different rates.
+var LEAFKC={succulent:.30,waxy:.70,normal:1.0,thin:1.30};
 var AWC={standard:.35,peat:.38,coco:.40,aroid:.28,cactus:.22,moisture:.45};
-var KC={dry:.45,dry_mesic:.80,mesic:1.0,wet_mesic:1.15,wet:1.30,low:.45,medium:1.0,high:1.30};
 var MAD={dry:.80,dry_mesic:.62,mesic:.50,wet_mesic:.42,wet:.35,low:.80,medium:.50,high:.35};
 // Pour now replaces what was lost (= deplete x runoff allowance).
 var RUNOFF=1.10,ETREF=2000,ETEXP=0.80;
@@ -327,11 +332,11 @@ function loadAll(){fetch('api/plants').then(function(r){return r.json();}).then(
 $('add').onclick=function(){var name=prompt('Name of the new plant:');if(!name)return;
   var id=name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||('plant-'+Date.now());
   if(plants.some(function(x){return x.id===id;}))id=id+'-'+Date.now();
-  plants.push({id:id,name:name,soil_volume_ml:1000,soil_type:'standard',sun:'part_shade',water_use:'mesic',growth_state:'auto',has_drainage:true,window:null,distance:'near',light_filtered:false});
+  plants.push({id:id,name:name,soil_volume_ml:1000,soil_type:'standard',sun:'part_shade',water_use:'mesic',leaf_type:'normal',growth_state:'auto',has_drainage:true,window:null,distance:'near',light_filtered:false});
   render();persist('Added '+name);openTune(id);};
 
 $('m-soil').innerHTML=selOpts(SOIL);$('m-grow').innerHTML=selOpts(GROW);$('m-wu').innerHTML=selOpts(WU);$('m-sun').innerHTML=selOpts(SUN);
-$('m-window').innerHTML=selOpts(WINDOW);$('m-dist').innerHTML=selOpts(DIST);
+$('m-window').innerHTML=selOpts(WINDOW);$('m-dist').innerHTML=selOpts(DIST);$('m-leaf').innerHTML=selOpts(LEAF);
 
 // Lux for the live preview: placement if set, else a legacy measured value,
 // else the ideal for the plant's sun requirement.
@@ -351,7 +356,7 @@ function syncDistRow(){var w=$('m-window').value,off=(!w||w==='none');
 function fbar(nm,m){var w=clamp(m/2*100,0,100);return '<div class=fbar><span class=nm>'+nm+'</span><span class=tr><span class=fl style="width:'+w.toFixed(0)+'%"></span></span><span class=vl>'+m.toFixed(2)+'×</span></div>';}
 function computeTune(){
   syncDistRow();
-  var vol=+$('m-vol').value,soil=$('m-soil').value,lux=tuneLux(),wu=$('m-wu').value,grow=$('m-grow').value,drain=$('m-drain').checked;
+  var vol=+$('m-vol').value,soil=$('m-soil').value,lux=tuneLux(),wu=$('m-wu').value,leaf=$('m-leaf').value,grow=$('m-grow').value,drain=$('m-drain').checked;
   var tC=(climF-32)*5/9,hum=climHum,doy=Math.round((curMonth-0.5)*30.42);
   $('m-volout').textContent=vol>=1000?(vol/1000).toFixed(1)+' L':vol+' ml';
   var band=SUNLUX[$('m-sun').value],fit='';
@@ -365,7 +370,7 @@ function computeTune(){
     $('m-seasonnote').textContent='sun is '+(sf>=1?'+':'')+Math.round((sf-1)*100)+'% vs annual average · Jun '+jun+' / Dec '+dec;
   } else $('m-seasonnote').textContent='';
   var fv=clamp(svp(tC)*(1-hum/100)/VREF,0.4,2.5),fl=luxF(lux),L=dayLen(doy),
-      fs=clamp(0.5+0.5*(L/12),0.5,1.4),fg=grow==='active'?1:grow==='dormant'?DORM:clamp(DORM+(1-DORM)*(L-9)/5,DORM,1),kc=KC[wu]||1;
+      fs=clamp(0.5+0.5*(L/12),0.5,1.4),fg=grow==='active'?1:grow==='dormant'?DORM:clamp(DORM+(1-DORM)*(L-9)/5,DORM,1),kc=LEAFKC[leaf]||1;
   var dep=vol*(AWC[soil]||.35)*(MAD[wu]||.5),amt=dep*(drain?RUNOFF:ND),
       base=ET*evapVol(vol)*kc,loss=Math.max(base*fv*fl*fs*fg,EVAPFLOOR*base,0.1),iv=Math.round(clamp(dep/loss,IVMIN,IVMAX));
   $('m-interval').textContent=iv;$('m-amount').textContent=cups(amt);
@@ -375,7 +380,7 @@ function openTune(id){var p=plants.filter(function(x){return x.id===id;})[0];if(
   $('m-title').textContent=p.name||id;$('m-name').value=p.name||'';
   $('m-vol').value=p.soil_volume_ml||1000;$('m-soil').value=p.soil_type||'standard';
   $('m-window').value=p.window||'';$('m-dist').value=p.distance||'near';$('m-filt').checked=!!p.light_filtered;
-  $('m-sun').value=p.sun||'';$('m-wu').value=normWU(p.water_use);
+  $('m-sun').value=p.sun||'';$('m-wu').value=normWU(p.water_use);$('m-leaf').value=p.leaf_type||'normal';
   $('m-grow').value=p.growth_state||'auto';$('m-drain').checked=p.has_drainage!==false;
   computeTune();$('modal').style.display='flex';document.body.style.overflow='hidden';}
 function closeTune(){$('modal').style.display='none';document.body.style.overflow='';}
@@ -388,11 +393,11 @@ function applyTune(){var p=plants.filter(function(x){return x.id===mId;})[0];if(
     p.window=$('m-window').value||null;p.distance=$('m-dist').value;p.light_filtered=$('m-filt').checked;
     // Placement supersedes any old meter reading; drop it so it can't linger.
     if(p.window)p.light_lux=null;
-    p.sun=$('m-sun').value||null;p.water_use=$('m-wu').value;p.growth_state=$('m-grow').value;p.has_drainage=$('m-drain').checked;
+    p.sun=$('m-sun').value||null;p.water_use=$('m-wu').value;p.leaf_type=$('m-leaf').value;p.growth_state=$('m-grow').value;p.has_drainage=$('m-drain').checked;
     render();persist('Saved '+p.name);}closeTune();}
 
 $('grid').addEventListener('click',function(e){var b=e.target.closest('.edit');if(b)openTune(b.getAttribute('data-id'));});
-['m-vol','m-soil','m-window','m-dist','m-filt','m-sun','m-wu','m-grow','m-drain'].forEach(function(id){$(id).addEventListener('input',computeTune);});
+['m-vol','m-soil','m-window','m-dist','m-filt','m-sun','m-wu','m-leaf','m-grow','m-drain'].forEach(function(id){$(id).addEventListener('input',computeTune);});
 $('m-apply').onclick=applyTune;$('m-cancel').onclick=closeTune;$('m-close').onclick=closeTune;
 $('modal').addEventListener('click',function(e){if(e.target===$('modal'))closeTune();});
 loadAll();

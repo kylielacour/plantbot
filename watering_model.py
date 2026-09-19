@@ -52,19 +52,22 @@ MAX_INTERVAL_DAYS = 60
 # low/medium/high are kept as aliases of dry/mesic/wet for back-compatibility.
 #
 # Kc = transpiration intensity (a cactus loses far less water than a fern).
-# Compressed from its original spread: water_use feeds BOTH Kc and MAD, so the
-# interval scaled with MAD/Kc and one field moved it 14.5x end to end. Kc is
-# really about leaf type (a waxy succulent vs a thin-leaved aroid), which only
-# loosely tracks a soil-moisture preference, so the middle bands are pulled
-# toward 1.0 and the low end is reserved for genuine succulents.
-WATER_USE_KC = {
-    "dry": 0.45,        # cacti, succulents, sansevieria, ZZ
-    "dry_mesic": 0.80,  # drought-tolerant, likes to dry between waterings
-    "mesic": 1.00,      # most foliage (pothos, monstera)
-    "wet_mesic": 1.15,  # likes consistent moisture
-    "wet": 1.30,        # ferns, calathea, thirsty growers
-    "low": 0.45, "medium": 1.00, "high": 1.30,
+# Kc = transpiration intensity, driven by LEAF TYPE rather than by water_use.
+#
+# water_use used to set both Kc and MAD, so one field swung the interval 14.5x.
+# Worse, it can't actually answer both questions: garden.org lists ZZ plant and
+# pothos with the *identical* water preference ("Mesic, Dry Mesic"), yet a ZZ
+# wants ~30 days and a pothos ~11. The preference describes what soil moisture
+# a plant tolerates; it says nothing about how fast it drinks. A CAM succulent
+# transpires a fraction of what a thin-leaved aroid does at the same soil
+# moisture, and that is a property of the leaf, not of the soil.
+LEAF_TYPE_KC = {
+    "succulent": 0.30,  # CAM/water-storing: jade, sansevieria, ZZ, cacti
+    "waxy": 0.70,       # thick cuticle: hoya, peperomia, scindapsus
+    "normal": 1.00,     # most foliage: pothos, monstera, philodendron, ficus
+    "thin": 1.30,       # large thin or fine leaves: oxalis, calathea, strelitzia
 }
+_DEFAULT_LEAF_TYPE = "normal"
 
 # MAD = management-allowed depletion: how far we let the root zone dry before
 # rewatering (drives interval). Drought-lovers dry right out; wet-lovers stay damp.
@@ -229,7 +232,8 @@ class Plant:
     window: str | None = None        # south | west | east | north | none
     distance: str = _DEFAULT_DISTANCE  # in_window | near | mid | far
     light_filtered: bool = False     # sheer curtain / blinds / shade outside
-    water_use: str = "mesic"         # key into WATER_USE_KC (garden.org Water Pref)
+    water_use: str = "mesic"         # garden.org Water Preference -> MAD
+    leaf_type: str = "normal"        # key into LEAF_TYPE_KC -> Kc
     growth_state: str = "auto"       # active | dormant | auto
     has_drainage: bool = True
 
@@ -370,8 +374,10 @@ def growth_factor(growth_state: str, date: dt.date, latitude_deg: float) -> floa
                  _DORMANT_FACTOR, 1.0)
 
 
-def water_use_kc(water_use: str) -> float:
-    return WATER_USE_KC.get((water_use or "mesic").lower(), 1.0)
+def leaf_kc(leaf_type: str | None) -> float:
+    """Transpiration coefficient from leaf type."""
+    return LEAF_TYPE_KC.get(
+        (leaf_type or _DEFAULT_LEAF_TYPE).lower(), LEAF_TYPE_KC[_DEFAULT_LEAF_TYPE])
 
 
 def water_use_pour_fraction(water_use: str) -> float:
@@ -427,7 +433,7 @@ def daily_loss_ml(plant: Plant, conditions: Conditions, date: dt.date,
     f_light = lux_to_factor(effective_lux(plant, conditions, date, latitude_deg))
     f_season = season_factor(date, latitude_deg)
     f_growth = growth_factor(plant.growth_state, date, latitude_deg)
-    kc = water_use_kc(plant.water_use)
+    kc = leaf_kc(plant.leaf_type)
 
     # Baseline demand for this pot, before any seasonal/climate modulation.
     baseline = _ET_BASE_ML_PER_ML_SOIL * _evaporating_volume_ml(plant.soil_volume_ml) * kc
