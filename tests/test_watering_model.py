@@ -70,23 +70,47 @@ def test_drought_tolerant_depletes_more_than_moisture_lover():
     assert wm.deplete_ml(succulent) > wm.deplete_ml(thirsty)
 
 
-def test_pour_is_fraction_of_volume_by_water_use():
-    # mesic -> 8% of soil volume.
+def test_pour_replaces_what_was_lost():
+    """The pour must match deplete_ml: the interval is defined as the time to
+    lose that much, so pouring less leaves the soil drier every cycle."""
     plant = make_plant(soil_volume_ml=5000.0, water_use="mesic")
-    assert wm.pour_amount_ml(plant) == pytest.approx(0.08 * 5000.0)
+    assert wm.pour_amount_ml(plant) == pytest.approx(
+        wm.deplete_ml(plant) * wm._RUNOFF_ALLOWANCE)
 
 
-def test_wetter_preference_pours_more():
+def test_drought_tolerant_pours_more_not_less():
+    # Watered rarely, but thoroughly: a plant allowed to dry right out has lost
+    # more by the time it's due, so it needs more putting back.
     dry = make_plant(water_use="dry")
     wet = make_plant(water_use="wet")
-    assert wm.pour_amount_ml(wet) > wm.pour_amount_ml(dry)
+    assert wm.pour_amount_ml(dry) > wm.pour_amount_ml(wet)
 
 
 def test_no_drainage_reduces_pour():
     drained = wm.pour_amount_ml(make_plant(has_drainage=True))
     undrained = wm.pour_amount_ml(make_plant(has_drainage=False))
     assert undrained < drained
-    assert undrained == pytest.approx(drained * wm._NO_DRAINAGE_FACTOR)
+    assert undrained == pytest.approx(
+        drained * wm._NO_DRAINAGE_FACTOR / wm._RUNOFF_ALLOWANCE)
+
+
+def test_pot_size_changes_interval():
+    """Pot volume used to cancel out of deplete/loss entirely, so a 250 ml pot
+    and a 25 L pot came out identical. Bigger pots must last longer."""
+    cond = wm.Conditions(temp_c=21, humidity_pct=50)
+    small = _interval(make_plant(soil_volume_ml=250.0), cond)
+    large = _interval(make_plant(soil_volume_ml=25000.0), cond)
+    assert large > small * 2
+
+
+def test_interval_scales_sublinearly_with_volume():
+    # loss ~ V^0.8, storage ~ V, so interval ~ V^0.2: 8x the volume is about
+    # 1.5x the interval -- bigger pots last longer, but not proportionally.
+    cond = wm.Conditions(temp_c=21, humidity_pct=50)
+    base = _interval(make_plant(soil_volume_ml=1000.0), cond)
+    eight = _interval(make_plant(soil_volume_ml=8000.0), cond)
+    expected = 8.0 ** (1.0 - wm._ET_VOLUME_EXPONENT)
+    assert eight == pytest.approx(base * expected, rel=0.25)
 
 
 def test_five_level_water_use_interval_monotonic():

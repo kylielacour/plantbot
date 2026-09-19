@@ -263,9 +263,11 @@ function solarI(d){var m=meanSin();if(!(m>0))return 1;
   var v=Math.sin(Math.max(noonAlt(d),0)*Math.PI/180)/m;return v>0.05?v:0.05;}
 var WU_ALIAS={low:"dry",medium:"mesic",high:"wet"};
 var AWC={standard:.35,peat:.38,coco:.40,aroid:.28,cactus:.22,moisture:.45};
-var KC={dry:.30,dry_mesic:.55,mesic:1.0,wet_mesic:1.25,wet:1.45,low:.30,medium:1.0,high:1.45};
-var MAD={dry:.90,dry_mesic:.70,mesic:.50,wet_mesic:.40,wet:.30,low:.90,medium:.50,high:.30};
-var POUR={dry:.06,dry_mesic:.07,mesic:.08,wet_mesic:.09,wet:.10,low:.06,medium:.08,high:.10};
+var KC={dry:.45,dry_mesic:.80,mesic:1.0,wet_mesic:1.15,wet:1.30,low:.45,medium:1.0,high:1.30};
+var MAD={dry:.80,dry_mesic:.62,mesic:.50,wet_mesic:.42,wet:.35,low:.80,medium:.50,high:.35};
+// Pour now replaces what was lost (= deplete x runoff allowance).
+var RUNOFF=1.10,ETREF=2000,ETEXP=0.80;
+function evapVol(v){return ETREF*Math.pow(Math.max(v,1)/ETREF,ETEXP);}
 var ET=0.0215,ND=0.8,LAT=40,MLCUP=236.588,MLTB=14.7868;
 // Mirrors watering_model: dormancy floor, evaporation floor, interval bounds.
 var DORM=0.65,EVAPFLOOR=0.30,IVMIN=2,IVMAX=60;
@@ -364,8 +366,8 @@ function computeTune(){
   } else $('m-seasonnote').textContent='';
   var fv=clamp(svp(tC)*(1-hum/100)/VREF,0.4,2.5),fl=luxF(lux),L=dayLen(doy),
       fs=clamp(0.5+0.5*(L/12),0.5,1.4),fg=grow==='active'?1:grow==='dormant'?DORM:clamp(DORM+(1-DORM)*(L-9)/5,DORM,1),kc=KC[wu]||1;
-  var dep=vol*(AWC[soil]||.35)*(MAD[wu]||.5),amt=(POUR[wu]||.08)*vol*(drain?1:ND),
-      base=ET*vol*kc,loss=Math.max(base*fv*fl*fs*fg,EVAPFLOOR*base,0.1),iv=Math.round(clamp(dep/loss,IVMIN,IVMAX));
+  var dep=vol*(AWC[soil]||.35)*(MAD[wu]||.5),amt=dep*(drain?RUNOFF:ND),
+      base=ET*evapVol(vol)*kc,loss=Math.max(base*fv*fl*fs*fg,EVAPFLOOR*base,0.1),iv=Math.round(clamp(dep/loss,IVMIN,IVMAX));
   $('m-interval').textContent=iv;$('m-amount').textContent=cups(amt);
   $('m-factors').innerHTML=fbar('dryness',fv)+fbar('light',fl)+fbar('season',fs)+fbar('growth',fg)+fbar('water-use',kc);
 }

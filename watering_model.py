@@ -52,24 +52,29 @@ MAX_INTERVAL_DAYS = 60
 # low/medium/high are kept as aliases of dry/mesic/wet for back-compatibility.
 #
 # Kc = transpiration intensity (a cactus loses far less water than a fern).
+# Compressed from its original spread: water_use feeds BOTH Kc and MAD, so the
+# interval scaled with MAD/Kc and one field moved it 14.5x end to end. Kc is
+# really about leaf type (a waxy succulent vs a thin-leaved aroid), which only
+# loosely tracks a soil-moisture preference, so the middle bands are pulled
+# toward 1.0 and the low end is reserved for genuine succulents.
 WATER_USE_KC = {
-    "dry": 0.30,        # cacti, succulents, sansevieria, ZZ
-    "dry_mesic": 0.55,  # drought-tolerant, likes to dry between waterings
+    "dry": 0.45,        # cacti, succulents, sansevieria, ZZ
+    "dry_mesic": 0.80,  # drought-tolerant, likes to dry between waterings
     "mesic": 1.00,      # most foliage (pothos, monstera)
-    "wet_mesic": 1.25,  # likes consistent moisture
-    "wet": 1.45,        # ferns, calathea, thirsty growers
-    "low": 0.30, "medium": 1.00, "high": 1.45,
+    "wet_mesic": 1.15,  # likes consistent moisture
+    "wet": 1.30,        # ferns, calathea, thirsty growers
+    "low": 0.45, "medium": 1.00, "high": 1.30,
 }
 
 # MAD = management-allowed depletion: how far we let the root zone dry before
 # rewatering (drives interval). Drought-lovers dry right out; wet-lovers stay damp.
 MAD_BY_WATER_USE = {
-    "dry": 0.90,
-    "dry_mesic": 0.70,
+    "dry": 0.80,
+    "dry_mesic": 0.62,
     "mesic": 0.50,
-    "wet_mesic": 0.40,
-    "wet": 0.30,
-    "low": 0.90, "medium": 0.50, "high": 0.30,
+    "wet_mesic": 0.42,
+    "wet": 0.35,
+    "low": 0.80, "medium": 0.50, "high": 0.35,
 }
 
 # Measured-pour size as a fraction of soil volume, by water preference (drives
@@ -157,6 +162,17 @@ _DEFAULT_AWC = 0.35
 
 # Safety factor on the pour for pots without drainage (avoid pooling).
 _NO_DRAINAGE_FACTOR = 0.8
+
+# A little past field capacity on a drained pot, so salts flush out the bottom.
+_RUNOFF_ALLOWANCE = 1.10
+
+# Evaporative demand is anchored at a mid-size pot; see _evaporating_volume_ml.
+_ET_REFERENCE_VOLUME_ML = 2000.0
+# Between pure surface-area scaling (2/3) and pure volume scaling (1.0). Tested
+# against real pots: 2/3 alone stretched the big ones too far (a 12 L bird of
+# paradise came out at 26 days) because a large pot carries a large canopy, and
+# transpiration tracks leaf area as well as soil surface.
+_ET_VOLUME_EXPONENT = 0.80
 
 # How far dormancy alone can slow a plant's water use (see growth_factor).
 _DORMANT_FACTOR = 0.65
@@ -385,6 +401,25 @@ def deplete_ml(plant: Plant, species: SpeciesData | None = None) -> float:
     return plant.soil_volume_ml * awc * allowed_depletion(plant.water_use)
 
 
+def _evaporating_volume_ml(volume_ml: float) -> float:
+    """Effective volume driving evaporative demand.
+
+    Water leaves through the soil *surface* and the canopy standing over it,
+    both of which scale with the pot's cross-section (~V^(2/3) for pots of
+    similar proportions). Storage, though, scales with the whole volume.
+
+    Using plain volume for both made pot size cancel out of the interval
+    completely: a 250 ml pot and a 25 L pot both came out at 15 days, when in
+    reality a 4" pot dries in under a week and a 14" pot takes weeks. With this
+    term the interval scales as ~V^(1/3) -- i.e. with soil *depth*, which is
+    the classic result for how long a container takes to dry.
+
+    Anchored at a mid-size pot so the existing ET calibration still holds there.
+    """
+    ref = _ET_REFERENCE_VOLUME_ML
+    return ref * (max(volume_ml, 1.0) / ref) ** _ET_VOLUME_EXPONENT
+
+
 def daily_loss_ml(plant: Plant, conditions: Conditions, date: dt.date,
                   latitude_deg: float) -> float:
     """Estimated water lost per day (evapotranspiration)."""
@@ -395,7 +430,7 @@ def daily_loss_ml(plant: Plant, conditions: Conditions, date: dt.date,
     kc = water_use_kc(plant.water_use)
 
     # Baseline demand for this pot, before any seasonal/climate modulation.
-    baseline = _ET_BASE_ML_PER_ML_SOIL * plant.soil_volume_ml * kc
+    baseline = _ET_BASE_ML_PER_ML_SOIL * _evaporating_volume_ml(plant.soil_volume_ml) * kc
     loss = baseline * f_vpd * f_light * f_season * f_growth
     # Floor is relative to the plant's *own* baseline, so a cactus floors at a
     # cactus's rate; an absolute floor would bind year-round for low-kc plants.
@@ -403,12 +438,20 @@ def daily_loss_ml(plant: Plant, conditions: Conditions, date: dt.date,
 
 
 def pour_amount_ml(plant: Plant, species: SpeciesData | None = None) -> float:
-    """A measured pour: a per-water-use fraction of soil volume (reduced for
-    pots without drainage). Amount is driven by pot size + water preference."""
-    amount = water_use_pour_fraction(plant.water_use) * plant.soil_volume_ml
-    if not plant.has_drainage:
-        amount *= _NO_DRAINAGE_FACTOR
-    return amount
+    """Replace the water actually used since the last watering.
+
+    This has to equal deplete_ml, because the interval is *defined* as the time
+    taken to lose that much. Pouring anything less means the soil never returns
+    to field capacity and ratchets drier every cycle -- the previous fixed
+    6-10%-of-volume pour replaced only ~41% of what the model said was lost.
+
+    A drained pot gets a little extra to carry salts out the bottom. An
+    undrained pot gets less than it lost, deliberately: there is nowhere for
+    surplus to go, and standing water at the base is worse than being slightly
+    under-watered.
+    """
+    amount = deplete_ml(plant)
+    return amount * (_RUNOFF_ALLOWANCE if plant.has_drainage else _NO_DRAINAGE_FACTOR)
 
 
 def _comfort_warnings(plant: Plant, species: SpeciesData | None,
